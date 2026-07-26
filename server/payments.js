@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
 import express from 'express'
 import { requireUser } from './auth.js'
-import { configured, supabaseAdmin } from './supabase.js'
+import { adminConfigured, supabaseAdmin } from './supabase.js'
 
 export const paymentsRouter = express.Router()
 const paystack = async (path, options = {}) => {
@@ -17,7 +17,7 @@ const paystack = async (path, options = {}) => {
 
 paymentsRouter.post('/initialize', requireUser, async (req, res, next) => {
   try {
-    if (!configured) throw Object.assign(new Error('Supabase is not configured.'), { status: 503 })
+    if (!adminConfigured) throw Object.assign(new Error('SUPABASE_SECRET_KEY is not configured on the server.'), { status: 503 })
     const amount = Number(req.body.amount)
     if (!Number.isFinite(amount) || amount < 100 || amount > 1_000_000) return res.status(400).json({ message: 'Amount must be between ₦100 and ₦1,000,000.' })
     const { data: profile, error: profileError } = await supabaseAdmin.from('users').select('email').eq('id', req.user.id).single()

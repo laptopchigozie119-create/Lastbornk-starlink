@@ -13,12 +13,20 @@ import { secureApi, supabase } from './lib/supabase'
 import { getCurrentPosition } from './lib/location'
 import { submitRouterLogin } from './lib/captive'
 
+const EMPTY_DASHBOARD = {
+  user: { id: '', name: 'Lastbornk user', balance: 0, wallet_balance: 0 },
+  nearby: [],
+  bookings: [],
+  transactions: [],
+}
 const money = (n) => `₦${Number(n || 0).toLocaleString('en-NG')}`
 const formatDate = (date) => new Intl.DateTimeFormat('en-NG', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }).format(new Date(date))
 const api = async (url, options) => {
   const res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...options })
-  const data = await res.json()
-  if (!res.ok) throw new Error(data.message || 'Something went wrong')
+  const text = await res.text()
+  let data = null
+  try { data = text ? JSON.parse(text) : null } catch { data = null }
+  if (!res.ok) throw new Error(data?.message || `Request failed (${res.status})`)
   return data
 }
 
@@ -28,7 +36,7 @@ function Logo({ compact = false }) {
 
 function App() {
   const [page, setPage] = useState('home')
-  const [dashboard, setDashboard] = useState(null)
+  const [dashboard, setDashboard] = useState(EMPTY_DASHBOARD)
   const [hosts, setHosts] = useState([])
   const [bookings, setBookings] = useState([])
   const [loading, setLoading] = useState(true)
@@ -49,20 +57,25 @@ function App() {
         const [dash, hostList, bookingList] = await Promise.all([api('/api/dashboard'), api('/api/hosts'), api('/api/bookings')])
         setDashboard(dash); setHosts(hostList); setBookings(bookingList)
       }
-    } catch (e) { notify(e.message, 'error') }
-    finally { setLoading(false) }
+    } catch (e) {
+      setDashboard(current => current || EMPTY_DASHBOARD)
+      setHosts(current => Array.isArray(current) ? current : [])
+      setBookings(current => Array.isArray(current) ? current : [])
+      notify(e.message, 'error')
+    } finally { setLoading(false) }
   }
   useEffect(() => { load() }, [])
   useEffect(()=>{const params=new URLSearchParams(location.search);const reference=params.get('reference');if(supabase&&params.get('payment')==='callback'&&reference){secureApi(`/api/payments/verify/${encodeURIComponent(reference)}`).then(()=>{notify('Payment confirmed. Your wallet has been credited.');load();history.replaceState({},'',location.pathname)}).catch(e=>notify(e.message,'error'))}},[])
   const notify = (message, type = 'success') => { setToast({ message, type }); setTimeout(() => setToast(null), 3200) }
 
-  if (loading && !dashboard) return <div className="splash"><Logo/><Loader2 className="spin"/></div>
-  const user = dashboard?.user || {}
+  if (loading) return <div className="splash"><Logo/><Loader2 className="spin"/></div>
+  const safeDashboard = dashboard || EMPTY_DASHBOARD
+  const user = safeDashboard?.user || EMPTY_DASHBOARD.user
   const nav = role === 'owner'
     ? [{id:'home',label:'Overview',icon:Home},{id:'explore',label:'My listing',icon:Radio},{id:'messages',label:'Inbox',icon:MessageCircle},{id:'activity',label:'Bookings',icon:Activity},{id:'profile',label:'Account',icon:UserRound}]
     : [{id:'home',label:'Home',icon:Home},{id:'explore',label:'Find WiFi',icon:Search},{id:'activity',label:'Activity',icon:Activity},{id:'profile',label:'Account',icon:UserRound}]
 
-  const pageProps = { user, dashboard, hosts, bookings, setPage, setModal, notify, reload: load, role }
+  const pageProps = { user, dashboard: safeDashboard, hosts: hosts || [], bookings: bookings || [], setPage, setModal, notify, reload: load, role }
   return <div className="app-shell">
     <aside className="sidebar">
       <Logo/>
@@ -109,9 +122,9 @@ function HomePage({ user, dashboard, setPage, setModal }) {
     </section>
     <button className="find-banner" onClick={()=>setPage('explore')}><span className="find-icon"><Navigation size={24}/></span><span><b>Find Starlink near you</b><small>Fast, reliable internet is closer than you think</small></span><ChevronRight/></button>
     <SectionTitle title="Nearby hotspots" action="See all" onClick={()=>setPage('explore')}/>
-    <div className="host-grid">{dashboard.nearby.map(host=><HostCard key={host.id} host={host} onBook={()=>setModal({type:'book',host})}/>)}</div>
+    {(dashboard?.nearby ?? []).length > 0 ? <div className="host-grid">{(dashboard?.nearby ?? []).map(host=><HostCard key={host.id} host={host} onBook={()=>setModal({type:'book',host})}/>)}</div> : <div className="empty compact-empty"><Wifi size={30}/><h3>No nearby hotspots yet</h3><p>Use Find nearby WiFi to search live hosts around your current location.</p></div>}
     <SectionTitle title="Recent activity" action="View history" onClick={()=>setPage('activity')}/>
-    <div className="activity-list compact">{dashboard.transactions.slice(0,3).map(tx=><Transaction key={tx.id} tx={tx}/>)}</div>
+    {(dashboard?.transactions ?? []).length > 0 ? <div className="activity-list compact">{(dashboard?.transactions ?? []).slice(0,3).map(tx=><Transaction key={tx.id} tx={tx}/>)}</div> : <div className="empty compact-empty"><Activity size={30}/><h3>No activity yet</h3><p>Wallet funding and internet sessions will appear here.</p></div>}
   </>
 }
 
@@ -143,20 +156,20 @@ function ActivityPage({ bookings, dashboard, role, setModal }) {
   const [tab,setTab]=useState('bookings')
   return <><div className="page-heading"><p className="eyebrow">YOUR HISTORY</p><h1>{role==='owner'?'Guest bookings':'Activity'}</h1><p>{role==='owner'?'See customer sessions and earnings.':'All your sessions and wallet movements in one place.'}</p></div>
     <div className="tabs"><button className={tab==='bookings'?'active':''} onClick={()=>setTab('bookings')}>Sessions</button><button className={tab==='transactions'?'active':''} onClick={()=>setTab('transactions')}>Transactions</button></div>
-    {tab==='bookings'?<div className="booking-list">{bookings.map(b=><div className="booking-row" key={b.id}><span className="booking-icon"><Wifi/></span><div><h3>{b.hostName}</h3><p>{formatDate(b.date)} · {b.hours} hour{b.hours>1?'s':''}</p><small className={`status ${b.status}`}>{b.status}</small></div><div className="booking-amount"><b>{money(b.amount||b.amount_paid)}</b><span>{b.code||b.access_code}</span></div>{b.status==='active'&&<button className="secondary" onClick={()=>setModal({type:'message',session:b})}><MessageCircle size={15}/> Message Host</button>}</div>)}</div>:<div className="activity-list">{dashboard.transactions.map(tx=><Transaction key={tx.id} tx={tx}/>)}</div>}
+    {tab==='bookings' ? ((bookings ?? []).length > 0 ? <div className="booking-list">{(bookings ?? []).map(b=><div className="booking-row" key={b.id}><span className="booking-icon"><Wifi/></span><div><h3>{b.hostName || b.hosts?.business_name || 'Starlink session'}</h3><p>{formatDate(b.date || b.created_at)} · {b.hours || 1} hour{(b.hours || 1)>1?'s':''}</p><small className={`status ${b.status}`}>{b.status}</small></div><div className="booking-amount"><b>{money(b.amount||b.amount_paid)}</b><span>{b.code||b.access_code}</span></div>{b.status==='active'&&<button className="secondary" onClick={()=>setModal({type:'message',session:b})}><MessageCircle size={15}/> Message Host</button>}</div>)}</div> : <div className="empty compact-empty"><Wifi size={30}/><h3>No sessions yet</h3><p>Your purchased WiFi sessions will appear here.</p></div>) : ((dashboard?.transactions ?? []).length > 0 ? <div className="activity-list">{(dashboard?.transactions ?? []).map(tx=><Transaction key={tx.id} tx={tx}/>)}</div> : <div className="empty compact-empty"><Activity size={30}/><h3>No transactions yet</h3><p>Wallet and voucher transactions will appear here.</p></div>)}
   </>
 }
 
-function OwnerHome({ user, hosts, bookings, setModal, setPage }) {
-  const listing=hosts.find(h=>h.ownerId==='u1'); const earnings=bookings.reduce((s,b)=>s+b.amount,0)
+function OwnerHome({ user, hosts = [], bookings = [], setModal, setPage }) {
+  const listing=hosts.find(h=>h.ownerId===user?.id) || hosts[0]; const earnings=bookings.reduce((s,b)=>s+Number(b.amount || b.amount_paid || 0),0)
   return <><div className="welcome"><div><p className="eyebrow">HOST DASHBOARD</p><h1>Welcome back, Tomi</h1><p>Here’s how your Starlink is doing.</p></div><button className="primary" onClick={()=>setModal({type:'host'})}><Plus size={19}/> Add hotspot</button></div>
   <div className="metric-grid"><div className="metric blue"><span><Wallet/></span><p>Total earnings</p><h2>{money(earnings)}</h2><small>+12.4% this month</small></div><div className="metric"><span><Users/></span><p>Total sessions</p><h2>{bookings.length}</h2><small>2 this week</small></div><div className="metric"><span><Gauge/></span><p>Average speed</p><h2>{listing?.speed||168} <small>Mbps</small></h2><small>Excellent connection</small></div></div>
   <SectionTitle title="Your hotspot" action="Manage" onClick={()=>setPage('explore')}/>{listing?<HostCard host={listing} onBook={()=>{}}/>:<div className="owner-empty"><span><Radio/></span><h3>List your Starlink</h3><p>Turn spare bandwidth into income by sharing securely with people nearby.</p><button className="primary" onClick={()=>setModal({type:'host'})}>Create listing</button></div>}
   <SectionTitle title="Recent guest sessions" action="See all" onClick={()=>setPage('activity')}/><div className="booking-list">{bookings.slice(0,2).map(b=><div className="booking-row" key={b.id}><span className="booking-icon"><UserRound/></span><div><h3>Verified guest</h3><p>{formatDate(b.date)} · {b.hours} hour session</p></div><div className="booking-amount"><b className="positive">+{money(b.amount)}</b><span>Completed</span></div></div>)}</div></>
 }
 
-function OwnerListing({ hosts, setModal, notify, reload }) {
-  const listing=hosts.find(h=>h.ownerId==='u1')
+function OwnerListing({ hosts = [], user, setModal, notify, reload }) {
+  const listing=hosts.find(h=>h.ownerId===user?.id) || hosts[0]
   const toggle=async()=>{try{if(listing.production)await secureApi(`/api/hosts/${listing.id}`,{method:'PATCH',body:JSON.stringify({isOnline:!listing.online})});else await api(`/api/hosts/${listing.id}`,{method:'PATCH',body:JSON.stringify({online:!listing.online})});notify(listing.online?'Hotspot paused':'Hotspot is now live');reload()}catch(e){notify(e.message,'error')}}
   return <><div className="welcome"><div><p className="eyebrow">HOST SETTINGS</p><h1>My hotspot</h1><p>Control availability, pricing and guest access.</p></div>{!listing&&<button className="primary" onClick={()=>setModal({type:'host'})}><Plus/> Add hotspot</button>}</div>
   {listing?<div className="listing-detail"><div className="listing-status"><div><span className={listing.online?'live-dot':''}/><b>{listing.online?'Your hotspot is live':'Your hotspot is paused'}</b><p>{listing.online?'Customers nearby can discover and book it.':'Your listing is hidden from customers.'}</p></div><button className={`switch ${listing.online?'on':''}`} onClick={toggle}><i/></button></div><HostCard host={listing} onBook={()=>{}}/><div className="settings-grid"><div><span><CreditCard/></span><p>Hourly price</p><b>{money(listing.price)}</b></div><div><span><Users/></span><p>Guest capacity</p><b>{listing.spots} available</b></div><div><span><Gauge/></span><p>Advertised speed</p><b>{listing.speed} Mbps</b></div></div><button className="secondary wide" onClick={()=>setModal({type:'host'})}><Settings size={18}/> Edit listing details</button></div>:<div className="owner-empty"><Radio/><h3>No hotspot yet</h3><p>Create your first listing to start earning.</p></div>}</>

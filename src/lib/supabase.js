@@ -1,7 +1,9 @@
 import { createClient } from '@supabase/supabase-js'
 
-const url = import.meta.env.VITE_SUPABASE_URL
-const key = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY
+// The project URL and publishable key are public client configuration. Vercel
+// environment variables override these defaults when present.
+const url = import.meta.env.VITE_SUPABASE_URL || 'https://spfbxjshmeshxvndpvqz.supabase.co'
+const key = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || 'sb_publishable_FBVszbiIY1TDuS6Ncf3EAw_63jvQoGG'
 export const supabase = url && key ? createClient(url, key) : null
 
 export async function authHeaders() {

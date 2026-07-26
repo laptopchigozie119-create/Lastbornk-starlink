@@ -134,5 +134,12 @@ app.use((error, req, res, _next) => {
   res.status(status).json({ message: status === 500 && process.env.NODE_ENV === 'production' ? 'An internal error occurred.' : error.message })
 })
 
-const port = process.env.PORT || 4000
-app.listen(port, () => console.log(`Lastbornk API running at http://localhost:${port} (${supabaseConfigured ? 'Supabase' : 'demo JSON'} mode)`))
+export default app
+
+// Start a long-running HTTP server only when this file is executed directly.
+// Vercel imports the Express app from api/index.js as a serverless function.
+const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+if (isDirectRun) {
+  const port = process.env.PORT || 4000
+  app.listen(port, () => console.log(`Lastbornk API running at http://localhost:${port} (${supabaseConfigured ? 'Supabase' : 'demo JSON'} mode)`))
+}

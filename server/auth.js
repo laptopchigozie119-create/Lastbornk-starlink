@@ -1,10 +1,10 @@
-import { configured, supabaseAdmin } from './supabase.js'
+import { configured, supabaseAuth } from './supabase.js'
 
 export async function requireUser(req, res, next) {
   try {
     const token = req.headers.authorization?.replace(/^Bearer\s+/i, '')
     if (token && configured) {
-      const { data, error } = await supabaseAdmin.auth.getUser(token)
+      const { data, error } = await supabaseAuth.auth.getUser(token)
       if (error || !data.user) return res.status(401).json({ message: 'Invalid or expired session.' })
       req.user = data.user
       req.accessToken = token
