@@ -1,0 +1,18 @@
+# FreeRADIUS rlm_rest module. Symlink into mods-enabled/lastbornk.
+# Replace API URL and NETWORK_SHARED_SECRET using your secret manager/template.
+rest lastbornk {
+  connect_uri = "https://api.lastbornk.ng"
+  authorize {
+    uri = "${..connect_uri}/api/network/authorize"
+    method = "post"
+    body = "json"
+    data = '{"username":"%{User-Name}","password":"%{User-Password}","callingStationId":"%{Calling-Station-Id}","nasIdentifier":"%{NAS-Identifier}"}'
+    tls = ${..tls}
+    header = "x-network-secret: NETWORK_SHARED_SECRET"
+  }
+  tls {
+    check_cert = yes
+    check_cert_cn = yes
+  }
+  timeout = 4.0
+}

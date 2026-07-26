@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Connecting to Lastbornk…</title>
+  <style>body{font:16px system-ui;background:#eef5ff;color:#102345;display:grid;place-items:center;min-height:100vh;margin:0}.card{background:#fff;padding:28px;border-radius:18px;text-align:center;box-shadow:0 15px 40px #1232}.dot{width:38px;height:38px;border:4px solid #dbe9ff;border-top-color:#0b63f6;border-radius:50%;animation:s 1s linear infinite;margin:auto}@keyframes s{to{transform:rotate(360deg)}}</style>
+</head>
+<body>
+  <div class="card"><div class="dot"></div><h2>Opening Lastbornk</h2><p>Choose a plan to connect to this hotspot.</p></div>
+  <script>
+    // Replace APP_URL and HOST_UUID before uploading this file to each router.
+    // RouterOS substitutes the escaped $(...) values on every request.
+    const app = 'https://app.lastbornk.ng/captive';
+    const query = new URLSearchParams({
+      host: 'HOST_UUID',
+      mac: '$(mac-esc)',
+      ip: '$(ip-esc)',
+      loginUrl: '$(link-login-only-esc)',
+      originalUrl: '$(link-orig-esc)',
+      router: '$(server-name-esc)',
+      error: '$(error-esc)'
+    });
+    window.location.replace(app + '?' + query.toString());
+  </script>
+  <noscript><a href="https://app.lastbornk.ng/captive?host=HOST_UUID&amp;mac=$(mac-esc)&amp;loginUrl=$(link-login-only-esc)">Continue to Lastbornk</a></noscript>
+</body>
+</html>

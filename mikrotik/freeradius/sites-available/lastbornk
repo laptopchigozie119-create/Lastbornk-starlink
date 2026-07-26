@@ -1,0 +1,23 @@
+# Add `lastbornk` to the authorize section of your enabled default site.
+# rlm_rest must map the JSON reply object to RADIUS reply attributes.
+authorize {
+  filter_username
+  pap
+  lastbornk
+  if (&control:Auth-Type == Reject || reject) {
+    reject
+  }
+  update control {
+    Auth-Type := Accept
+  }
+}
+
+authenticate {
+  Auth-Type Accept {
+    accept
+  }
+}
+
+accounting {
+  detail
+}

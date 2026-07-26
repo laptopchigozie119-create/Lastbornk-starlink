@@ -1,0 +1,21 @@
+{
+  "users": [
+    {"id":"u1","name":"Tomi Aigbe","email":"tomi@example.com","phone":"0803 555 0198","role":"customer","balance":12500,"joined":"2025-11-03"}
+  ],
+  "hosts": [
+    {"id":"h1","ownerId":"o1","name":"Osas Connect","area":"GRA, Benin City","address":"Boundary Road, GRA","lat":6.3176,"lng":5.6037,"distance":0.4,"price":500,"duration":"1 hour","speed":168,"rating":4.9,"reviews":124,"spots":4,"verified":true,"online":true,"avatar":"OO","amenities":["Power backup","Indoor seating","Secure location"]},
+    {"id":"h2","ownerId":"o2","name":"Ivie's Starlink Hub","area":"Sapele Road, Benin City","address":"Near Dumez Junction","lat":6.2921,"lng":5.6135,"distance":0.9,"price":350,"duration":"1 hour","speed":142,"rating":4.8,"reviews":87,"spots":2,"verified":true,"online":true,"avatar":"IH","amenities":["Power backup","Outdoor seating"]},
+    {"id":"h3","ownerId":"o3","name":"Ugbowo FastNet","area":"Ugbowo, Benin City","address":"Opposite UNIBEN Main Gate","lat":6.3944,"lng":5.6114,"distance":2.1,"price":300,"duration":"1 hour","speed":115,"rating":4.7,"reviews":203,"spots":7,"verified":true,"online":true,"avatar":"UF","amenities":["Covered seating","Charging points","Power backup"]},
+    {"id":"h4","ownerId":"o4","name":"Ekenwan Sky WiFi","area":"Ekenwan Road, Benin City","address":"Ekenwan Campus axis","lat":6.3033,"lng":5.5736,"distance":3.4,"price":250,"duration":"1 hour","speed":98,"rating":4.6,"reviews":56,"spots":3,"verified":false,"online":true,"avatar":"ES","amenities":["Outdoor seating","Charging points"]},
+    {"id":"h5","ownerId":"o5","name":"Ring Road Link","area":"Ring Road, Benin City","address":"Oba Market Road","lat":6.3350,"lng":5.6242,"distance":4.2,"price":400,"duration":"1 hour","speed":151,"rating":4.8,"reviews":176,"spots":0,"verified":true,"online":false,"avatar":"RL","amenities":["Indoor seating","Secure location"]}
+  ],
+  "bookings": [
+    {"id":"b1","userId":"u1","hostId":"h3","hostName":"Ugbowo FastNet","date":"2026-07-22T13:30:00.000Z","hours":2,"amount":600,"status":"completed","code":"LBK-8341"},
+    {"id":"b2","userId":"u1","hostId":"h1","hostName":"Osas Connect","date":"2026-07-18T09:00:00.000Z","hours":1,"amount":500,"status":"completed","code":"LBK-2109"}
+  ],
+  "transactions": [
+    {"id":"t1","userId":"u1","type":"credit","label":"Wallet top-up","amount":10000,"date":"2026-07-23T10:15:00.000Z"},
+    {"id":"t2","userId":"u1","type":"debit","label":"Ugbowo FastNet","amount":600,"date":"2026-07-22T13:30:00.000Z"},
+    {"id":"t3","userId":"u1","type":"credit","label":"Wallet top-up","amount":5000,"date":"2026-07-16T08:45:00.000Z"}
+  ]
+}
