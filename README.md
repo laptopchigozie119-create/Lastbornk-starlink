@@ -67,6 +67,8 @@ With mock router mode enabled, `POST /api/vouchers/purchase` still performs the 
 
 Apply `supabase/migrations/002_realtime_notifications.sql` to enable cross-device Realtime alerts for deposits and connection changes. The in-app notification panel and same-device deposit, voucher, connect, and disconnect alerts work immediately after deployment.
 
+Apply `supabase/migrations/003_chat_engine.sql` once before testing chat. It upgrades `messages` for text, images, voice/audio, video and files, and supports mock testing where one Supabase identity acts as customer and host. Attachments are stored privately in the `chat-attachments` Supabase Storage bucket; the API creates the bucket on first upload and returns short-lived signed download URLs.
+
 The Supabase URL and publishable key have safe public defaults in the client, but can still be overridden with `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_URL`, and `SUPABASE_PUBLISHABLE_KEY`.
 
 > This is a production-oriented technical scaffold, not a claim of financial or telecommunications regulatory approval. Complete security testing, monitoring, reconciliation, NDPA review, and payment/network compliance before processing real funds.

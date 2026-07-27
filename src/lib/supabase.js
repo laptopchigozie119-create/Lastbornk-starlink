@@ -13,11 +13,14 @@ export async function authHeaders() {
 }
 
 export async function secureApi(path, options = {}) {
+  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData
   const response = await fetch(`${import.meta.env.VITE_API_URL || ''}${path}`, {
     ...options,
-    headers: { 'Content-Type': 'application/json', ...(await authHeaders()), ...options.headers },
+    headers: { ...(isFormData ? {} : { 'Content-Type': 'application/json' }), ...(await authHeaders()), ...options.headers },
   })
-  const body = response.status === 204 ? null : await response.json()
-  if (!response.ok) throw new Error(body?.message || 'Request failed')
+  const text = response.status === 204 ? '' : await response.text()
+  let body = null
+  try { body = text ? JSON.parse(text) : null } catch { body = text ? { message: text } : null }
+  if (!response.ok) throw new Error(body?.message || `Request failed (${response.status})`)
   return body
 }

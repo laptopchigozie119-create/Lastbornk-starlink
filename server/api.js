@@ -1,5 +1,6 @@
 import express from 'express'
 import crypto from 'node:crypto'
+import multer from 'multer'
 import { requireAdmin, requireUser } from './auth.js'
 import { adminConfigured, configured, supabaseAdmin, userClient } from './supabase.js'
 
@@ -8,6 +9,16 @@ const ensure = () => { if (!configured) throw Object.assign(new Error('Supabase 
 const dbFor = (req) => req.accessToken ? userClient(req.accessToken) : supabaseAdmin
 const validMac = (value) => !value || /^([0-9A-F]{2}:){5}[0-9A-F]{2}$/i.test(value)
 const mockRouterEnabled = process.env.MOCK_ROUTER_ENABLED !== 'false'
+const CHAT_BUCKET = 'chat-attachments'
+const chatUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 12 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, done) => {
+    const mime = file.mimetype.split(';')[0]
+    const allowed = /^(image\/(jpeg|png|gif|webp)|audio\/(mpeg|mp4|ogg|wav|webm)|video\/(mp4|webm)|application\/(pdf|zip|msword|vnd\.openxmlformats-officedocument\..+)|text\/plain)$/i.test(mime)
+    done(allowed ? null : Object.assign(new Error('Unsupported attachment type.'), { status: 415 }), allowed)
+  },
+})
 
 export const generateVoucherPin = () => String(crypto.randomInt(100000, 1000000))
 
@@ -291,17 +302,66 @@ apiRouter.get('/hosts/analytics',requireUser,async(req,res,next)=>{
   }catch(e){next(e)}
 })
 
+async function validateChatParticipant(userId,{hostId,sessionId,receiverId}){
+  if(!adminConfigured)throw Object.assign(new Error('SUPABASE_SECRET_KEY is required for chat.'),{status:503})
+  if(!hostId||!sessionId)throw Object.assign(new Error('A hotspot and voucher session are required for chat.'),{status:400})
+  const{data:session,error}=await supabaseAdmin.from('vouchers_sessions').select('id,user_id,host_id,status,hosts!inner(user_id,business_name)').eq('id',sessionId).eq('host_id',hostId).single()
+  if(error)throw error
+  const hostOwnerId=session.hosts.user_id
+  if(userId!==session.user_id&&userId!==hostOwnerId)throw Object.assign(new Error('You are not a participant in this conversation.'),{status:403})
+  const expectedReceiver=userId===hostOwnerId?session.user_id:hostOwnerId
+  if(receiverId&&receiverId!==expectedReceiver)throw Object.assign(new Error('Invalid message recipient.'),{status:400})
+  return{session,hostOwnerId,receiverId:expectedReceiver}
+}
+
+async function hydrateChatMessages(rows){
+  return Promise.all((rows||[]).map(async row=>{
+    if(!row.attachment_path)return row
+    const{data}=await supabaseAdmin.storage.from(CHAT_BUCKET).createSignedUrl(row.attachment_path,3600)
+    return{...row,attachment_url:data?.signedUrl||null}
+  }))
+}
+
+function handleChatError(error,res,next){
+  console.error('[chat]',{code:error.code,message:error.message,details:error.details})
+  if(error.status)return res.status(error.status).json({message:error.message})
+  if(['42703','42P01','23514','PGRST204'].includes(error.code))return res.status(503).json({message:'The chat database migration is not installed. Apply migration 003_chat_engine.sql in Supabase.'})
+  return next(error)
+}
+
 apiRouter.get('/messages',requireUser,async(req,res,next)=>{
-  try{ensure();const hostId=req.query.hostId;if(!hostId)return res.status(400).json({message:'hostId is required'});const{data,error}=await dbFor(req).from('messages').select('*').eq('host_id',hostId).or(`sender_id.eq.${req.user.id},receiver_id.eq.${req.user.id}`).order('timestamp');if(error)throw error;res.json(data)}catch(e){next(e)}
+  try{ensure();const{hostId,sessionId}=req.query;await validateChatParticipant(req.user.id,{hostId,sessionId});const{data,error}=await supabaseAdmin.from('messages').select('*').eq('host_id',hostId).eq('session_id',sessionId).order('timestamp');if(error)throw error;res.json(await hydrateChatMessages(data))}catch(e){handleChatError(e,res,next)}
 })
 apiRouter.get('/messages/inbox',requireUser,async(req,res,next)=>{
-  try{ensure();const{data:host,error:hErr}=await dbFor(req).from('hosts').select('id').eq('user_id',req.user.id).single();if(hErr)throw hErr;const{data,error}=await dbFor(req).from('messages').select('*').eq('host_id',host.id).order('timestamp',{ascending:false});if(error)throw error;res.json(data)}catch(e){next(e)}
+  try{ensure();if(!adminConfigured)throw Object.assign(new Error('SUPABASE_SECRET_KEY is required for chat.'),{status:503});const{data:host,error:hErr}=await supabaseAdmin.from('hosts').select('id').eq('user_id',req.user.id).single();if(hErr)throw hErr;const{data,error}=await supabaseAdmin.from('messages').select('*, vouchers_sessions(user_id)').eq('host_id',host.id).order('timestamp',{ascending:false});if(error)throw error;res.json(await hydrateChatMessages(data))}catch(e){handleChatError(e,res,next)}
+})
+apiRouter.post('/messages/upload',requireUser,chatUpload.single('file'),async(req,res,next)=>{
+  try{
+    ensure();if(!req.file)return res.status(400).json({message:'Choose a file to upload.'})
+    const{hostId,sessionId,receiverId}=req.body;await validateChatParticipant(req.user.id,{hostId,sessionId,receiverId})
+    const{error:bucketError}=await supabaseAdmin.storage.getBucket(CHAT_BUCKET)
+    if(bucketError){const{error:createError}=await supabaseAdmin.storage.createBucket(CHAT_BUCKET,{public:false,fileSizeLimit:12*1024*1024});if(createError&&!String(createError.message).includes('already exists'))throw createError}
+    const safeName=req.file.originalname.replace(/[^a-zA-Z0-9._-]/g,'_').slice(-120)||'attachment'
+    const path=`${hostId}/${sessionId}/${crypto.randomUUID()}-${safeName}`
+    const{error}=await supabaseAdmin.storage.from(CHAT_BUCKET).upload(path,req.file.buffer,{contentType:req.file.mimetype,upsert:false});if(error)throw error
+    const kind=req.file.mimetype.startsWith('image/')?'image':req.file.mimetype.startsWith('audio/')?'audio':req.file.mimetype.startsWith('video/')?'video':'file'
+    res.status(201).json({path,name:req.file.originalname,mime:req.file.mimetype,size:req.file.size,kind})
+  }catch(e){handleChatError(e,res,next)}
 })
 apiRouter.post('/messages',requireUser,async(req,res,next)=>{
-  try{ensure();const{text,receiverId,hostId,sessionId}=req.body;if(!text?.trim()||text.length>2000)return res.status(400).json({message:'Message must be 1–2,000 characters.'});const{data,error}=await dbFor(req).from('messages').insert({sender_id:req.user.id,receiver_id:receiverId,host_id:hostId,session_id:sessionId||null,text:text.trim()}).select().single();if(error)throw error;res.status(201).json(data)}catch(e){next(e)}
+  try{
+    ensure();const{text='',receiverId,hostId,sessionId,attachment,authorRole}=req.body;const cleanText=String(text).trim()
+    if(cleanText.length>2000)return res.status(400).json({message:'Messages cannot exceed 2,000 characters.'})
+    if(!cleanText&&!attachment?.path)return res.status(400).json({message:'Type a message or attach a file.'})
+    const conversation=await validateChatParticipant(req.user.id,{hostId,sessionId,receiverId})
+    const messageType=attachment?.kind||'text'
+    const resolvedRole=req.user.id===conversation.hostOwnerId&&req.user.id!==conversation.session.user_id?'host':req.user.id===conversation.session.user_id&&req.user.id!==conversation.hostOwnerId?'customer':authorRole==='host'?'host':'customer'
+    const{data,error}=await supabaseAdmin.from('messages').insert({sender_id:req.user.id,receiver_id:conversation.receiverId,host_id:hostId,session_id:sessionId,text:cleanText||null,message_type:messageType,author_role:resolvedRole,attachment_path:attachment?.path||null,attachment_name:attachment?.name||null,attachment_mime:attachment?.mime||null,attachment_size:attachment?.size||null}).select().single();if(error)throw error
+    res.status(201).json((await hydrateChatMessages([data]))[0])
+  }catch(e){handleChatError(e,res,next)}
 })
 apiRouter.patch('/messages/read',requireUser,async(req,res,next)=>{
-  try{ensure();const{error}=await dbFor(req).from('messages').update({read_at:new Date().toISOString()}).eq('host_id',req.body.hostId).eq('receiver_id',req.user.id).is('read_at',null);if(error)throw error;res.sendStatus(204)}catch(e){next(e)}
+  try{ensure();const{hostId,sessionId}=req.body;await validateChatParticipant(req.user.id,{hostId,sessionId});const{error}=await supabaseAdmin.from('messages').update({read_at:new Date().toISOString()}).eq('host_id',hostId).eq('session_id',sessionId).eq('receiver_id',req.user.id).is('read_at',null);if(error)throw error;res.sendStatus(204)}catch(e){handleChatError(e,res,next)}
 })
 
 apiRouter.post('/tickets',requireUser,async(req,res,next)=>{
