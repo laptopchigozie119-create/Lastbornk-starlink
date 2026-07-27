@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   Activity, ArrowDownLeft, ArrowRight, ArrowUpRight, BadgeCheck, Bell, Check,
@@ -8,7 +8,10 @@ import {
 } from 'lucide-react'
 import './styles.css'
 import './network-features.css'
+import './mock-system.css'
 import { HostInbox, MessageHostModal, ProductionTopUp, SupportModal } from './components/NetworkFeatures'
+import { MockConnection } from './components/MockConnection'
+import { NotificationPanel } from './components/NotificationPanel'
 import { secureApi, supabase } from './lib/supabase'
 import { getCurrentPosition } from './lib/location'
 import { submitRouterLogin } from './lib/captive'
@@ -43,7 +46,21 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [modal, setModal] = useState(null)
   const [toast, setToast] = useState(null)
+  const [notifications, setNotifications] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('lastbornk_notifications') || '[]') } catch { return [] }
+  })
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const seenTransactionIds = useRef(new Set())
   const [role, setRole] = useState('customer')
+
+  const notify = useCallback((message, type = 'success', kind = null) => {
+    setToast({ message, type })
+    setTimeout(() => setToast(null), 3200)
+    if (type === 'success' && kind) {
+      const titles = { deposit: 'Deposit successful', voucher: 'Voucher purchased', connection: 'Connection update' }
+      setNotifications(current => [{ id: crypto.randomUUID(), title: titles[kind] || 'Lastbornk update', message, kind, read: false, createdAt: new Date().toISOString() }, ...current].slice(0, 50))
+    }
+  }, [])
 
   const load = async () => {
     setLoading(true)
@@ -51,9 +68,11 @@ function App() {
       if (supabase) {
         const [profile, transactions, activeSessions, ownHost] = await Promise.all([secureApi('/api/me'), secureApi('/api/transactions'), secureApi('/api/vouchers/active'), secureApi('/api/hosts/mine')])
         const user={...profile,balance:Number(profile.wallet_balance)}
-        const txs=transactions.map(t=>({...t,date:t.created_at,label:t.type.replaceAll('_',' '),type:['wallet_credit','host_earning','refund'].includes(t.type)?'credit':'debit'}))
+        const txs=(transactions||[]).map(t=>({...t,date:t.created_at,label:t.type.replaceAll('_',' '),type:['wallet_credit','host_earning','refund'].includes(t.type)?'credit':'debit'}))
         const own=ownHost?[{...ownHost,ownerId:ownHost.user_id,name:ownHost.business_name,area:ownHost.address||'Your hotspot',price:Number(ownHost.voucher_fee),speed:ownHost.speed_mbps,distance:0,rating:5,reviews:0,spots:ownHost.capacity,online:ownHost.is_online,verified:ownHost.verified,avatar:ownHost.business_name.slice(0,2).toUpperCase(),production:true}]:[]
-        setDashboard({user,nearby:[],transactions:txs,bookings:activeSessions});setHosts(own);setBookings(activeSessions.map(s=>({...s,hostName:s.hosts?.business_name,hours:Math.max(1,Math.round((new Date(s.expires_at)-new Date(s.starts_at))/3600000)),amount:Number(s.amount_paid),code:s.access_code})))
+        let analytics=null
+        if(ownHost){try{analytics=await secureApi('/api/hosts/analytics')}catch{/* Host analytics can recover on refresh. */}}
+        setDashboard({user,nearby:[],transactions:txs,bookings:activeSessions||[],analytics});setHosts(own);setBookings((activeSessions||[]).map(s=>({...s,hostName:s.hosts?.business_name,hours:Math.max(1,Math.round((new Date(s.expires_at)-new Date(s.starts_at))/3600000)),amount:Number(s.amount_paid),code:s.access_code})))
       } else {
         const [dash, hostList, bookingList] = await Promise.all([api('/api/dashboard'), api('/api/hosts'), api('/api/bookings')])
         setDashboard(dash); setHosts(hostList); setBookings(bookingList)
@@ -66,8 +85,10 @@ function App() {
     } finally { setLoading(false) }
   }
   useEffect(() => { load() }, [])
-  useEffect(()=>{const params=new URLSearchParams(location.search);const reference=params.get('reference');if(supabase&&params.get('payment')==='callback'&&reference){secureApi(`/api/payments/verify/${encodeURIComponent(reference)}`).then(()=>{notify('Payment confirmed. Your wallet has been credited.');load();history.replaceState({},'',location.pathname)}).catch(e=>notify(e.message,'error'))}},[])
-  const notify = (message, type = 'success') => { setToast({ message, type }); setTimeout(() => setToast(null), 3200) }
+  useEffect(() => { localStorage.setItem('lastbornk_notifications', JSON.stringify(notifications)) }, [notifications])
+  useEffect(()=>{const params=new URLSearchParams(location.search);const reference=params.get('reference');if(supabase&&params.get('payment')==='callback'&&reference){secureApi(`/api/payments/verify/${encodeURIComponent(reference)}`).then(()=>{notify('Payment confirmed. Your wallet has been credited.','success','deposit');load();history.replaceState({},'',location.pathname)}).catch(e=>notify(e.message,'error'))}},[])
+  useEffect(()=>{if(!supabase||!dashboard?.user?.id)return undefined;const channel=supabase.channel(`lastbornk-alerts:${dashboard.user.id}`).on('postgres_changes',{event:'INSERT',schema:'public',table:'transactions',filter:`user_id=eq.${dashboard.user.id}`},({new:row})=>{seenTransactionIds.current.add(row.id);if(row.type==='wallet_credit')notify(`Your wallet was credited with ${money(row.amount)}.`,'success','deposit')}).on('postgres_changes',{event:'UPDATE',schema:'public',table:'vouchers_sessions',filter:`user_id=eq.${dashboard.user.id}`},({new:row})=>{if(row.status==='used')notify(`Voucher ${row.access_code} connected successfully.`,'success','connection')}).subscribe();return()=>{supabase.removeChannel(channel)}},[dashboard?.user?.id,notify])
+  useEffect(()=>{if(!supabase||!dashboard?.user?.id)return undefined;(dashboard.transactions||[]).forEach(tx=>seenTransactionIds.current.add(tx.id));const timer=setInterval(async()=>{try{const rows=await secureApi('/api/transactions');for(const row of rows||[]){if(!seenTransactionIds.current.has(row.id)){seenTransactionIds.current.add(row.id);if(row.type==='wallet_credit'){notify(`Your wallet was credited with ${money(row.amount)}.`,'success','deposit');load()}}}}catch{/* Realtime remains primary; polling retries automatically. */}},8000);return()=>clearInterval(timer)},[dashboard?.user?.id,notify])
 
   if (loading) return <div className="splash"><Logo/><Loader2 className="spin"/></div>
   const safeDashboard = dashboard || EMPTY_DASHBOARD
@@ -89,23 +110,24 @@ function App() {
       <header>
         <button className="mobile-logo"><Logo compact/></button>
         <div className="role-switch"><button className={role==='customer'?'selected':''} onClick={()=>{setRole('customer');setPage('home')}}>Find internet</button><button className={role==='owner'?'selected':''} onClick={()=>{setRole('owner');setPage('home')}}>Host dashboard</button></div>
-        <div className="header-actions"><button className="icon-btn"><Bell size={20}/><i/></button><div className="avatar">TA</div></div>
+        <div className="header-actions"><button className="icon-btn" aria-label="Open notifications" onClick={()=>setNotificationsOpen(open=>!open)}><Bell size={20}/>{notifications.some(item=>!item.read)&&<i/>}</button><div className="avatar">TA</div></div>
       </header>
       <div className="page-wrap">
         {page === 'home' && (role === 'customer' ? <HomePage {...pageProps}/> : <OwnerHome {...pageProps}/>)}
         {page === 'explore' && (role === 'customer' ? <ExplorePage {...pageProps}/> : <OwnerListing {...pageProps}/>)}
         {page === 'messages' && role === 'owner' && <><div className="page-heading"><p className="eyebrow">REAL-TIME SUPPORT</p><h1>Customer inbox</h1><p>Reply to guests connected to your hotspot.</p></div><HostInbox currentUserId={user.id}/></>}
         {page === 'activity' && <ActivityPage {...pageProps}/>}
-        {page === 'profile' && <ProfilePage {...pageProps}/>} 
+        {page === 'profile' && <ProfilePage {...pageProps}/>}
       </div>
     </main>
     <nav className="bottom-nav">{nav.map(({id,label,icon:Icon}) => <button key={id} className={page===id?'active':''} onClick={()=>setPage(id)}><Icon size={21}/><span>{label}</span></button>)}</nav>
     {modal?.type === 'topup' && <ProductionTopUp close={()=>setModal(null)}/>}
     {modal?.type === 'support' && <SupportModal activeSession={modal.session} close={()=>setModal(null)}/>}
     {modal?.type === 'message' && <MessageHostModal session={modal.session} currentUserId={user.id} close={()=>setModal(null)}/>}
-    {modal?.type === 'book' && <BookingModal host={modal.host} user={user} close={()=>setModal(null)} success={(booking)=>{setModal({type:'confirmed',booking});load()}}/>}
-    {modal?.type === 'confirmed' && <ConfirmedModal booking={modal.booking} close={()=>setModal(null)}/>} 
+    {modal?.type === 'book' && <BookingModal host={modal.host} user={user} close={()=>setModal(null)} success={(booking)=>{notify(`Voucher ${booking.code} purchased for ${money(booking.amount)}.`,'success','voucher');setModal({type:'confirmed',booking});load()}}/>}
+    {modal?.type === 'confirmed' && <ConfirmedModal booking={modal.booking} close={()=>setModal(null)}/>}
     {modal?.type === 'host' && <HostModal close={()=>setModal(null)} success={()=>{setModal(null);notify('Your hotspot is now listed');load()}}/>}
+    {notificationsOpen&&<NotificationPanel notifications={notifications} close={()=>setNotificationsOpen(false)} markAllRead={()=>setNotifications(items=>items.map(item=>({...item,read:true})))} clearAll={()=>setNotifications([])}/>}
     {toast && <div className={`toast ${toast.type}`}><span>{toast.type==='error'?<X size={17}/>:<Check size={17}/>}</span>{toast.message}</div>}
   </div>
 }
@@ -153,20 +175,30 @@ function ExplorePage({ hosts, setModal, notify }) {
 
 function Transaction({ tx }) { const credit=tx.type==='credit'; return <div className="transaction"><span className={`tx-icon ${credit?'credit':'debit'}`}>{credit?<ArrowDownLeft/>:<ArrowUpRight/>}</span><div><b>{tx.label}</b><small>{formatDate(tx.date)}</small></div><strong className={credit?'positive':''}>{credit?'+':'−'}{money(tx.amount)}</strong></div> }
 
-function ActivityPage({ bookings, dashboard, role, setModal }) {
+function ActivityPage({ bookings, dashboard, role, setModal, notify, reload }) {
   const [tab,setTab]=useState('bookings')
-  return <><div className="page-heading"><p className="eyebrow">YOUR HISTORY</p><h1>{role==='owner'?'Guest bookings':'Activity'}</h1><p>{role==='owner'?'See customer sessions and earnings.':'All your sessions and wallet movements in one place.'}</p></div>
+  return <>
+    <div className="page-heading"><p className="eyebrow">YOUR HISTORY</p><h1>{role==='owner'?'Guest bookings':'Activity'}</h1><p>{role==='owner'?'See customer sessions and earnings.':'All your sessions and wallet movements in one place.'}</p></div>
     <div className="tabs"><button className={tab==='bookings'?'active':''} onClick={()=>setTab('bookings')}>Sessions</button><button className={tab==='transactions'?'active':''} onClick={()=>setTab('transactions')}>Transactions</button></div>
-    {tab==='bookings' ? ((bookings ?? []).length > 0 ? <div className="booking-list">{(bookings ?? []).map(b=><div className="booking-row" key={b.id}><span className="booking-icon"><Wifi/></span><div><h3>{b.hostName || b.hosts?.business_name || 'Starlink session'}</h3><p>{formatDate(b.date || b.created_at)} · {b.hours || 1} hour{(b.hours || 1)>1?'s':''}</p><small className={`status ${b.status}`}>{b.status}</small></div><div className="booking-amount"><b>{money(b.amount||b.amount_paid)}</b><span>{b.code||b.access_code}</span></div>{b.status==='active'&&<button className="secondary" onClick={()=>setModal({type:'message',session:b})}><MessageCircle size={15}/> Message Host</button>}</div>)}</div> : <div className="empty compact-empty"><Wifi size={30}/><h3>No sessions yet</h3><p>Your purchased WiFi sessions will appear here.</p></div>) : ((dashboard?.transactions ?? []).length > 0 ? <div className="activity-list">{(dashboard?.transactions ?? []).map(tx=><Transaction key={tx.id} tx={tx}/>)}</div> : <div className="empty compact-empty"><Activity size={30}/><h3>No transactions yet</h3><p>Wallet and voucher transactions will appear here.</p></div>)}
+    {tab==='bookings' ? ((bookings ?? []).length > 0 ? <div className="session-list">{(bookings ?? []).map(b=><div className="session-card" key={b.id}>
+      <div className="booking-row"><span className="booking-icon"><Wifi/></span><div><h3>{b.hostName || b.hosts?.business_name || 'Starlink session'}</h3><p>{formatDate(b.date || b.created_at)} · {b.hours || 1} hour{(b.hours || 1)>1?'s':''}</p><small className={`status ${b.status}`}>{b.status==='used'?'connected':b.status}</small></div><div className="booking-amount"><b>{money(b.amount||b.amount_paid)}</b><span>PIN {b.code||b.access_code}</span></div><button className="secondary message-session" onClick={()=>setModal({type:'message',session:b})}><MessageCircle size={15}/> Message Host</button></div>
+      {b.production!==false&&<MockConnection session={b} notify={notify} reload={reload}/>}
+    </div>)}</div> : <div className="empty compact-empty"><Wifi size={30}/><h3>No sessions yet</h3><p>Your purchased WiFi sessions will appear here.</p></div>) : ((dashboard?.transactions ?? []).length > 0 ? <div className="activity-list">{(dashboard?.transactions ?? []).map(tx=><Transaction key={tx.id} tx={tx}/>)}</div> : <div className="empty compact-empty"><Activity size={30}/><h3>No transactions yet</h3><p>Wallet and voucher transactions will appear here.</p></div>)}
   </>
 }
 
-function OwnerHome({ user, hosts = [], bookings = [], setModal, setPage }) {
-  const listing=hosts.find(h=>h.ownerId===user?.id) || hosts[0]; const earnings=bookings.reduce((s,b)=>s+Number(b.amount || b.amount_paid || 0),0)
-  return <><div className="welcome"><div><p className="eyebrow">HOST DASHBOARD</p><h1>Welcome back, Tomi</h1><p>Here’s how your Starlink is doing.</p></div><button className="primary" onClick={()=>setModal({type:'host'})}><Plus size={19}/> Add hotspot</button></div>
-  <div className="metric-grid"><div className="metric blue"><span><Wallet/></span><p>Total earnings</p><h2>{money(earnings)}</h2><small>+12.4% this month</small></div><div className="metric"><span><Users/></span><p>Total sessions</p><h2>{bookings.length}</h2><small>2 this week</small></div><div className="metric"><span><Gauge/></span><p>Average speed</p><h2>{listing?.speed||168} <small>Mbps</small></h2><small>Excellent connection</small></div></div>
+function OwnerHome({ user, dashboard, hosts = [], bookings = [], setModal, setPage }) {
+  const listing=hosts.find(h=>h.ownerId===user?.id) || hosts[0]
+  const [analytics,setAnalytics]=useState(dashboard?.analytics||null)
+  useEffect(()=>{if(!listing?.production)return undefined;const refresh=()=>secureApi('/api/hosts/analytics').then(setAnalytics).catch(()=>{});refresh();const timer=setInterval(refresh,5000);return()=>clearInterval(timer)},[listing?.id])
+  const totalEarnings=analytics?.totalAccumulatedEarnings ?? bookings.reduce((s,b)=>s+Number(b.amount||b.amount_paid||0),0)
+  const pending=analytics?.pendingBalance||0
+  const guestSessions=analytics?.recentSessions||bookings
+  return <><div className="welcome"><div><p className="eyebrow">HOST DASHBOARD</p><h1>Welcome back, {user?.name?.split(' ')[0]||'Host'}</h1><p>Live revenue and bandwidth analytics from your hotspot.</p></div><button className="primary" onClick={()=>setModal({type:'host'})}><Plus size={19}/> Add hotspot</button></div>
+  <div className="host-finance-grid"><div className="earnings-hero"><span><Wallet/></span><p>Total Accumulated Earnings</p><h2>{money(totalEarnings)}</h2><small>Voucher revenue + data usage value, all time</small></div><div className="pending-card"><span><Activity/></span><p>Unconverted / Pending Balance</p><h2>{money(pending)}</h2><small>{Number(analytics?.totalDataGb||0).toFixed(4)} GB × {money(analytics?.rateNgnPerGb||100)}/GB</small></div></div>
+  <div className="metric-grid host-metrics"><div className="metric"><span><Users/></span><p>Connected users</p><h2>{analytics?.activeConnections||0}</h2><small>Live mock sessions</small></div><div className="metric"><span><Gauge/></span><p>Live throughput</p><h2>{Number(analytics?.liveMbps||0).toFixed(1)} <small>Mbps</small></h2><small>Across connected users</small></div><div className="metric"><span><Activity/></span><p>Total data consumed</p><h2>{Number(analytics?.totalDataGb||0).toFixed(4)} <small>GB</small></h2><small>Valued at ₦100 per GB</small></div></div>
   <SectionTitle title="Your hotspot" action="Manage" onClick={()=>setPage('explore')}/>{listing?<HostCard host={listing} onBook={()=>{}}/>:<div className="owner-empty"><span><Radio/></span><h3>List your Starlink</h3><p>Turn spare bandwidth into income by sharing securely with people nearby.</p><button className="primary" onClick={()=>setModal({type:'host'})}>Create listing</button></div>}
-  <SectionTitle title="Recent guest sessions" action="See all" onClick={()=>setPage('activity')}/><div className="booking-list">{bookings.slice(0,2).map(b=><div className="booking-row" key={b.id}><span className="booking-icon"><UserRound/></span><div><h3>Verified guest</h3><p>{formatDate(b.date)} · {b.hours} hour session</p></div><div className="booking-amount"><b className="positive">+{money(b.amount)}</b><span>Completed</span></div></div>)}</div></>
+  <SectionTitle title="Recent guest sessions" action="See all" onClick={()=>setPage('activity')}/>{guestSessions.length?<div className="booking-list">{guestSessions.slice(0,2).map(b=><div className="booking-row" key={b.id}><span className="booking-icon"><UserRound/></span><div><h3>Verified guest</h3><p>{formatDate(b.date||b.created_at)} · {b.hours||1} hour session</p></div><div className="booking-amount"><b className="positive">+{money(b.amount||b.amount_paid)}</b><span>{b.status}</span></div></div>)}</div>:<div className="empty compact-empty"><Users/><h3>No guest sessions yet</h3><p>Customer activity will appear here.</p></div>}</>
 }
 
 function OwnerListing({ hosts = [], user, setModal, notify, reload }) {

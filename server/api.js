@@ -123,8 +123,98 @@ apiRouter.post('/vouchers/purchase', requireUser, async (req,res,next)=>{
     })
   }catch(e){next(e)}
 })
+const MOCK_DATA_RATE_NGN_PER_GB = 100
+
+async function getSessionForCustomer(req, sessionId) {
+  const { data, error } = await dbFor(req)
+    .from('vouchers_sessions')
+    .select('*, hosts(business_name,user_id,address,is_online)')
+    .eq('id', sessionId)
+    .eq('user_id', req.user.id)
+    .single()
+  if (error) throw error
+  return data
+}
+
+async function calculateAndPersistUsage(session) {
+  if (!adminConfigured) throw Object.assign(new Error('SUPABASE_SECRET_KEY is required for mock telemetry.'), { status: 503 })
+  const { data: earning, error } = await supabaseAdmin
+    .from('transactions')
+    .select('id,metadata')
+    .eq('session_id', session.id)
+    .eq('type', 'host_earning')
+    .single()
+  if (error) throw error
+
+  const metadata = earning.metadata || {}
+  const mbps = Number(metadata.mock_mbps || 24)
+  const baseGb = Number(metadata.base_gb || metadata.data_used_gb || 0)
+  const connectedAt = metadata.connected_at ? new Date(metadata.connected_at).getTime() : Date.now()
+  const elapsedSeconds = metadata.connected ? Math.max(0, (Date.now() - connectedAt) / 1000) : 0
+  // Mbps × seconds gives megabits; divide by 8,000 for decimal gigabytes.
+  const dataUsedGb = baseGb + (mbps * elapsedSeconds) / 8000
+  const usageValueNgn = dataUsedGb * MOCK_DATA_RATE_NGN_PER_GB
+  const nextMetadata = {
+    ...metadata,
+    data_used_gb: Number(dataUsedGb.toFixed(6)),
+    usage_value_ngn: Number(usageValueNgn.toFixed(2)),
+    mock_mbps: mbps,
+    data_rate_ngn_per_gb: MOCK_DATA_RATE_NGN_PER_GB,
+  }
+
+  const { error: updateError } = await supabaseAdmin.from('transactions').update({ metadata: nextMetadata }).eq('id', earning.id)
+  if (updateError) throw updateError
+  return nextMetadata
+}
+
 apiRouter.get('/vouchers/active',requireUser,async(req,res,next)=>{
-  try{ensure();const{data,error}=await dbFor(req).from('vouchers_sessions').select('*, hosts(business_name,user_id,address)').eq('user_id',req.user.id).eq('status','active').gt('expires_at',new Date().toISOString()).order('created_at',{ascending:false});if(error)throw error;res.json(data)}catch(e){next(e)}
+  try{ensure();const{data,error}=await dbFor(req).from('vouchers_sessions').select('*, hosts(business_name,user_id,address)').eq('user_id',req.user.id).in('status',['active','used']).gt('expires_at',new Date().toISOString()).order('created_at',{ascending:false});if(error)throw error;res.json(data||[])}catch(e){next(e)}
+})
+
+apiRouter.post('/vouchers/:id/connect',requireUser,async(req,res,next)=>{
+  try{
+    ensure();if(!mockRouterEnabled)return res.status(501).json({message:'Mock router mode is disabled.'})
+    const session=await getSessionForCustomer(req,req.params.id)
+    if(new Date(session.expires_at)<=new Date())return res.status(410).json({message:'This voucher has expired.'})
+    if(!session.hosts?.is_online)return res.status(409).json({message:'This hotspot is currently offline.'})
+    const current=await calculateAndPersistUsage(session)
+    const now=new Date().toISOString()
+    const metadata={...current,connected:true,connected_at:now,base_gb:Number(current.data_used_gb||0),mock_mbps:Number(current.mock_mbps||crypto.randomInt(18,46))}
+    const{error:txError}=await supabaseAdmin.from('transactions').update({metadata}).eq('session_id',session.id).eq('type','host_earning');if(txError)throw txError
+    const{data:connected,error}=await supabaseAdmin.from('vouchers_sessions').update({status:'used'}).eq('id',session.id).select('*, hosts(business_name,user_id,address)').single();if(error)throw error
+    res.json({session:connected,connection:{connected:true,simulated:true,mbps:metadata.mock_mbps,dataUsedGb:metadata.data_used_gb,usageValueNgn:metadata.usage_value_ngn,rateNgnPerGb:MOCK_DATA_RATE_NGN_PER_GB}})
+  }catch(e){next(e)}
+})
+
+apiRouter.get('/vouchers/:id/telemetry',requireUser,async(req,res,next)=>{
+  try{ensure();const session=await getSessionForCustomer(req,req.params.id);const usage=await calculateAndPersistUsage(session);res.json({connected:session.status==='used'&&Boolean(usage.connected),simulated:true,mbps:Number(usage.mock_mbps||0),dataUsedGb:Number(usage.data_used_gb||0),usageValueNgn:Number(usage.usage_value_ngn||0),rateNgnPerGb:MOCK_DATA_RATE_NGN_PER_GB})}catch(e){next(e)}
+})
+
+apiRouter.post('/vouchers/:id/disconnect',requireUser,async(req,res,next)=>{
+  try{ensure();const session=await getSessionForCustomer(req,req.params.id);const usage=await calculateAndPersistUsage(session);const metadata={...usage,connected:false,base_gb:Number(usage.data_used_gb||0),disconnected_at:new Date().toISOString()};const{error:txError}=await supabaseAdmin.from('transactions').update({metadata}).eq('session_id',session.id).eq('type','host_earning');if(txError)throw txError;const{data,error}=await supabaseAdmin.from('vouchers_sessions').update({status:'active'}).eq('id',session.id).select('*, hosts(business_name,user_id,address)').single();if(error)throw error;res.json({session:data,connection:{connected:false,simulated:true,mbps:0,dataUsedGb:metadata.data_used_gb,usageValueNgn:metadata.usage_value_ngn,rateNgnPerGb:MOCK_DATA_RATE_NGN_PER_GB}})}catch(e){next(e)}
+})
+
+apiRouter.get('/hosts/analytics',requireUser,async(req,res,next)=>{
+  try{
+    ensure();if(!adminConfigured)throw Object.assign(new Error('SUPABASE_SECRET_KEY is required for host analytics.'),{status:503})
+    const{data:host,error:hostError}=await dbFor(req).from('hosts').select('*').eq('user_id',req.user.id).single();if(hostError)throw hostError
+    const{data:earnings,error}=await supabaseAdmin.from('transactions').select('amount,metadata,session_id').eq('host_id',host.id).eq('type','host_earning');if(error)throw error
+    const rows=(earnings||[]).map(row=>{
+      const metadata=row.metadata||{}
+      const mbps=Number(metadata.mock_mbps||0)
+      const baseGb=Number(metadata.base_gb||metadata.data_used_gb||0)
+      const elapsed=metadata.connected&&metadata.connected_at?Math.max(0,(Date.now()-new Date(metadata.connected_at).getTime())/1000):0
+      const dynamicGb=baseGb+(mbps*elapsed)/8000
+      return{...row,dynamicGb,usageValue:dynamicGb*MOCK_DATA_RATE_NGN_PER_GB}
+    })
+    const totalDataGb=rows.reduce((sum,row)=>sum+row.dynamicGb,0)
+    const pendingUsageValue=rows.reduce((sum,row)=>sum+row.usageValue,0)
+    const liveMbps=rows.filter(row=>row.metadata?.connected).reduce((sum,row)=>sum+Number(row.metadata?.mock_mbps||0),0)
+    const activeConnections=rows.filter(row=>row.metadata?.connected).length
+    const voucherRevenue=Number(host.total_earnings||0)
+    const{data:recentSessions}=await supabaseAdmin.from('vouchers_sessions').select('id,user_id,access_code,amount_paid,status,starts_at,expires_at,created_at').eq('host_id',host.id).order('created_at',{ascending:false}).limit(5)
+    res.json({hostId:host.id,voucherRevenue,totalDataGb:Number(totalDataGb.toFixed(4)),liveMbps,activeConnections,rateNgnPerGb:MOCK_DATA_RATE_NGN_PER_GB,pendingBalance:Number(pendingUsageValue.toFixed(2)),totalAccumulatedEarnings:Number((voucherRevenue+pendingUsageValue).toFixed(2)),recentSessions:recentSessions||[]})
+  }catch(e){next(e)}
 })
 
 apiRouter.get('/messages',requireUser,async(req,res,next)=>{

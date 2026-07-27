@@ -63,7 +63,9 @@ NETWORK_SHARED_SECRET
 MOCK_ROUTER_ENABLED=true
 ```
 
-With mock router mode enabled, `POST /api/vouchers/purchase` still performs the real atomic Supabase wallet debit and voucher insert, but simulates a successful MikroTik activation and assigns a unique six-digit voucher PIN.
+With mock router mode enabled, `POST /api/vouchers/purchase` still performs the real atomic Supabase wallet debit and voucher insert, but simulates a successful MikroTik activation and assigns a unique six-digit voucher PIN. Customers can then call the mock connect/disconnect endpoints, watch live Mbps/GB telemetry, and generate host-side usage value at ₦100/GB.
+
+Apply `supabase/migrations/002_realtime_notifications.sql` to enable cross-device Realtime alerts for deposits and connection changes. The in-app notification panel and same-device deposit, voucher, connect, and disconnect alerts work immediately after deployment.
 
 The Supabase URL and publishable key have safe public defaults in the client, but can still be overridden with `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_URL`, and `SUPABASE_PUBLISHABLE_KEY`.
 
