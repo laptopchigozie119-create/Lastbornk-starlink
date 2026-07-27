@@ -47,6 +47,62 @@ async function activateMockRouter(session) {
   }
 }
 
+async function purchaseOwnMockHotspot({ userId, host, clientMac, durationMinutes, speedProfile }) {
+  if (!adminConfigured) throw Object.assign(new Error('SUPABASE_SECRET_KEY is required for mock voucher purchases.'), { status: 503 })
+  const { data: profile, error: profileError } = await supabaseAdmin.from('users').select('wallet_balance').eq('id', userId).single()
+  if (profileError) throw profileError
+  const fee = Number(host.voucher_fee)
+  const oldBalance = Number(profile.wallet_balance)
+  const oldEarnings = Number(host.total_earnings || 0)
+  if (oldBalance < fee) throw Object.assign(new Error('Insufficient wallet balance. Add money before buying this voucher.'), { status: 402 })
+  if (!host.is_online) throw Object.assign(new Error('This hotspot is currently unavailable.'), { status: 409 })
+
+  let session = null
+  for (let attempt = 0; attempt < 8 && !session; attempt += 1) {
+    const { data, error } = await supabaseAdmin.from('vouchers_sessions').insert({
+      user_id: userId,
+      host_id: host.id,
+      access_code: generateVoucherPin(),
+      client_mac: clientMac || null,
+      speed_limit_profile: speedProfile,
+      amount_paid: fee,
+      expires_at: new Date(Date.now() + durationMinutes * 60_000).toISOString(),
+      status: 'active',
+    }).select('*').single()
+    if (!error) session = data
+    else if (error.code !== '23505') throw error
+  }
+  if (!session) throw Object.assign(new Error('Could not allocate a unique voucher PIN. Please retry.'), { status: 503 })
+
+  const newBalance = oldBalance - fee
+  const newEarnings = oldEarnings + fee
+  const rollback = async () => {
+    await supabaseAdmin.from('transactions').delete().eq('session_id', session.id)
+    await supabaseAdmin.from('vouchers_sessions').delete().eq('id', session.id)
+    await supabaseAdmin.from('users').update({ wallet_balance: oldBalance }).eq('id', userId).eq('wallet_balance', newBalance)
+    await supabaseAdmin.from('hosts').update({ total_earnings: oldEarnings }).eq('id', host.id).eq('total_earnings', newEarnings)
+  }
+
+  const { data: debited, error: debitError } = await supabaseAdmin.from('users').update({ wallet_balance: newBalance }).eq('id', userId).eq('wallet_balance', oldBalance).select('wallet_balance').maybeSingle()
+  if (debitError || !debited) {
+    await supabaseAdmin.from('vouchers_sessions').delete().eq('id', session.id)
+    throw debitError || Object.assign(new Error('Your wallet changed during purchase. Please retry.'), { status: 409 })
+  }
+
+  const { data: credited, error: earningError } = await supabaseAdmin.from('hosts').update({ total_earnings: newEarnings }).eq('id', host.id).eq('total_earnings', oldEarnings).select('total_earnings').maybeSingle()
+  if (earningError || !credited) {
+    await rollback()
+    throw earningError || Object.assign(new Error('The host balance changed during purchase. Please retry.'), { status: 409 })
+  }
+
+  const { error: transactionError } = await supabaseAdmin.from('transactions').insert([
+    { user_id: userId, host_id: host.id, session_id: session.id, type: 'voucher_debit', amount: fee, balance_after: newBalance, metadata: { mock_self_hosted_purchase: true } },
+    { user_id: host.user_id, host_id: host.id, session_id: session.id, type: 'host_earning', amount: fee, balance_after: null, metadata: { mock_self_hosted_purchase: true } },
+  ])
+  if (transactionError) { await rollback(); throw transactionError }
+  return session
+}
+
 // Called by FreeRADIUS rlm_rest, never by a browser or router client.
 apiRouter.post('/network/authorize', async (req,res,next)=>{
   try{
@@ -96,24 +152,35 @@ apiRouter.post('/vouchers/purchase', requireUser, async (req,res,next)=>{
     if(!hostId||!validMac(clientMac)) return res.status(400).json({message:'A valid host and client MAC address are required.'})
     if(!mockRouterEnabled) return res.status(501).json({message:'Physical router activation is not configured yet.'})
 
-    // purchase_voucher is one atomic PostgreSQL transaction: it locks the
-    // wallet, checks the balance/host, deducts the fee, credits host earnings,
-    // logs both transactions, and inserts an active voucher session.
-    const {data:purchasedSession,error}=await dbFor(req).rpc('purchase_voucher',{
-      p_host_id:hostId,
-      p_client_mac:clientMac||null,
-      p_duration_minutes:Number(durationMinutes),
-      p_speed_profile:speedProfile,
-    })
-    if(error){
-      const message=String(error.message||'')
-      if(message.includes('insufficient wallet balance')) return res.status(402).json({message:'Insufficient wallet balance. Add money before buying this voucher.'})
-      if(message.includes('host unavailable')) return res.status(409).json({message:'This hotspot is currently unavailable.'})
-      throw error
+    const minutes=Number(durationMinutes)
+    if(!Number.isInteger(minutes)||minutes<15||minutes>1440)return res.status(400).json({message:'Voucher duration must be between 15 minutes and 24 hours.'})
+    if(!adminConfigured)throw Object.assign(new Error('SUPABASE_SECRET_KEY is required for voucher purchases.'),{status:503})
+    const{data:host,error:hostError}=await supabaseAdmin.from('hosts').select('*').eq('id',hostId).single()
+    if(hostError)throw hostError
+
+    let purchasedSession
+    if(host.user_id===req.user.id){
+      // Mock testing commonly uses one account for both customer and host. The
+      // production RPC intentionally blocks this, so use a guarded mock-only
+      // purchase path with optimistic balance checks and compensating rollback.
+      purchasedSession=await purchaseOwnMockHotspot({userId:req.user.id,host,clientMac,durationMinutes:minutes,speedProfile})
+    }else{
+      // For normal customer-to-host purchases, purchase_voucher remains one
+      // atomic PostgreSQL transaction that locks and debits the real wallet.
+      const{data,error}=await dbFor(req).rpc('purchase_voucher',{p_host_id:hostId,p_client_mac:clientMac||null,p_duration_minutes:minutes,p_speed_profile:speedProfile})
+      if(error){
+        const message=String(error.message||'')
+        if(message.includes('insufficient wallet balance'))return res.status(402).json({message:'Insufficient wallet balance. Add money before buying this voucher.'})
+        if(message.includes('host unavailable'))return res.status(409).json({message:'This hotspot is currently unavailable.'})
+        throw error
+      }
+      // PostgREST versions can serialize a composite RPC result as either an
+      // object or a one-item array. Normalize it before router activation.
+      purchasedSession=Array.isArray(data)?data[0]:data
+      if(!purchasedSession?.id)throw Object.assign(new Error('Voucher purchase completed without a session record.'),{status:502})
     }
 
-    // Until physical MikroTik provisioning is connected, simulate a successful
-    // activation and replace the internal code with a user-friendly 6-digit PIN.
+    // Simulate physical MikroTik activation and guarantee a six-digit PIN.
     const {session,activation}=await activateMockRouter(purchasedSession)
     res.status(201).json({
       session,
@@ -121,7 +188,14 @@ apiRouter.post('/vouchers/purchase', requireUser, async (req,res,next)=>{
       routerActivation:activation,
       routerLogin:{username:session.access_code,password:session.access_code},
     })
-  }catch(e){next(e)}
+  }catch(e){
+    console.error('[voucher purchase]',{code:e.code,message:e.message,details:e.details,hint:e.hint})
+    if(e.status)return res.status(e.status).json({message:e.message})
+    if(['42P01','42883'].includes(e.code))return res.status(503).json({message:'The Supabase voucher schema is incomplete. Apply the project migrations and try again.'})
+    if(e.code==='42501')return res.status(503).json({message:'The voucher service does not have the required Supabase permissions.'})
+    if(e.code==='PGRST116')return res.status(404).json({message:'The selected hotspot or wallet profile was not found.'})
+    next(e)
+  }
 })
 const MOCK_DATA_RATE_NGN_PER_GB = 100
 
