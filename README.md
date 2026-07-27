@@ -50,7 +50,7 @@ The Express server serves the production build from `dist/`.
 
 ## Vercel
 
-`vercel.json` builds the Vite frontend, serves SPA routes from `index.html`, and forwards `/api/*` to the Express serverless entry point at `api/index.js`.
+`vercel.json` builds the Vite frontend, serves SPA routes from `index.html`, and forwards `/api/*` to the Express serverless entry point at `api/index.js`. Configure Paystack's webhook URL as `https://YOUR_VERCEL_DOMAIN/api/payments/webhook`.
 
 Configure these server-side variables in **Vercel → Project Settings → Environment Variables**, then redeploy:
 

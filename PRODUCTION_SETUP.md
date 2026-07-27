@@ -67,7 +67,7 @@ For UI-only demo mode, leave Supabase variables unset. For production functional
 2. Set the Paystack dashboard webhook URL to:
 
    ```text
-   https://api.lastbornk.ng/api/payments/webhook/paystack
+   https://YOUR_VERCEL_DOMAIN/api/payments/webhook
    ```
 
 3. Pressing **Add money** calls `POST /api/payments/initialize`. The backend creates a pending payment intent and initializes Paystack in kobo.

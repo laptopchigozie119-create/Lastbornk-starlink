@@ -16,7 +16,14 @@ const app = express()
 app.set('trust proxy', 1)
 app.use(helmet({ contentSecurityPolicy: false }))
 app.use(cors({ origin: process.env.APP_URL || 'http://localhost:5173', credentials: true }))
-app.use('/api/payments/webhook/paystack', express.raw({ type: 'application/json', limit: '1mb' }), paystackWebhook)
+
+// Paystack must receive an exact POST endpoint before express.json() mutates the
+// payload. `/api/payments/webhook` is the canonical URL configured in Paystack;
+// the two aliases keep older dashboard configurations working during rollout.
+const paystackRawBody = express.raw({ type: 'application/json', limit: '1mb' })
+app.post('/api/payments/webhook', paystackRawBody, paystackWebhook)
+app.post('/api/payments/webhook/paystack', paystackRawBody, paystackWebhook)
+app.post('/api/webhook', paystackRawBody, paystackWebhook)
 app.use(express.json({ limit: '100kb' }))
 app.use('/api', rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false }))
 app.use('/api/payments', paymentsRouter)

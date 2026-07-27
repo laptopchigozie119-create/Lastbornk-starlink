@@ -57,13 +57,17 @@ paymentsRouter.get('/verify/:reference', requireUser, async (req, res, next) => 
 // Mount BEFORE express.json(). Signature must be computed over the exact raw request body.
 export async function paystackWebhook(req, res, next) {
   try {
+    if (!process.env.PAYSTACK_SECRET_KEY) return res.status(503).json({ message: 'Paystack webhook is not configured.' })
+    if (!Buffer.isBuffer(req.body)) return res.status(400).json({ message: 'Webhook requires a raw JSON body.' })
+
     const signature = String(req.headers['x-paystack-signature'] || '')
-    const expected = crypto.createHmac('sha512', process.env.PAYSTACK_SECRET_KEY || '').update(req.body).digest('hex')
+    const expected = crypto.createHmac('sha512', process.env.PAYSTACK_SECRET_KEY).update(req.body).digest('hex')
     if (!signature || signature.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
       return res.status(401).send('Invalid signature')
     }
     const event = JSON.parse(req.body.toString('utf8'))
     if (event.event === 'charge.success' && event.data?.status === 'success' && event.data?.currency === 'NGN') {
+      if (!adminConfigured) throw Object.assign(new Error('SUPABASE_SECRET_KEY is not configured on the server.'), { status: 503 })
       const intentId = event.data.metadata?.payment_intent_id
       if (intentId) {
         const { error } = await supabaseAdmin.rpc('confirm_paystack_payment', {
