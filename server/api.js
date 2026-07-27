@@ -1,12 +1,51 @@
 import express from 'express'
 import crypto from 'node:crypto'
 import { requireAdmin, requireUser } from './auth.js'
-import { configured, supabaseAdmin, userClient } from './supabase.js'
+import { adminConfigured, configured, supabaseAdmin, userClient } from './supabase.js'
 
 export const apiRouter = express.Router()
 const ensure = () => { if (!configured) throw Object.assign(new Error('Supabase is not configured. Copy .env.example to .env.'), { status: 503 }) }
 const dbFor = (req) => req.accessToken ? userClient(req.accessToken) : supabaseAdmin
 const validMac = (value) => !value || /^([0-9A-F]{2}:){5}[0-9A-F]{2}$/i.test(value)
+const mockRouterEnabled = process.env.MOCK_ROUTER_ENABLED !== 'false'
+
+export const generateVoucherPin = () => String(crypto.randomInt(100000, 1000000))
+
+async function assignMockVoucherPin(sessionId) {
+  if (!adminConfigured) throw Object.assign(new Error('SUPABASE_SECRET_KEY is required for mock router activation.'), { status: 503 })
+
+  // access_code is unique. A collision is unlikely, but retry rather than
+  // exposing an intermittent failure during concurrent voucher purchases.
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const pin = generateVoucherPin()
+    const { data, error } = await supabaseAdmin
+      .from('vouchers_sessions')
+      .update({ access_code: pin, status: 'active' })
+      .eq('id', sessionId)
+      .select('*')
+      .single()
+
+    if (!error) return data
+    if (error.code !== '23505') throw error
+  }
+
+  throw Object.assign(new Error('Could not allocate a unique voucher PIN. Please retry.'), { status: 503 })
+}
+
+async function activateMockRouter(session) {
+  if (!mockRouterEnabled) throw Object.assign(new Error('Physical router activation is not configured yet.'), { status: 501 })
+  const activatedSession = await assignMockVoucherPin(session.id)
+  return {
+    session: activatedSession,
+    activation: {
+      success: true,
+      simulated: true,
+      provider: 'mock-mikrotik',
+      activatedAt: new Date().toISOString(),
+      message: 'Mock router activated successfully.',
+    },
+  }
+}
 
 // Called by FreeRADIUS rlm_rest, never by a browser or router client.
 apiRouter.post('/network/authorize', async (req,res,next)=>{
@@ -52,11 +91,36 @@ apiRouter.get('/hosts/nearby', requireUser, async (req, res, next) => {
 
 apiRouter.post('/vouchers/purchase', requireUser, async (req,res,next)=>{
   try {
-    ensure(); const {hostId,clientMac,durationMinutes=60,speedProfile='5M/5M'}=req.body
+    ensure()
+    const {hostId,clientMac,durationMinutes=60,speedProfile='5M/5M'}=req.body
     if(!hostId||!validMac(clientMac)) return res.status(400).json({message:'A valid host and client MAC address are required.'})
-    const {data,error}=await dbFor(req).rpc('purchase_voucher',{p_host_id:hostId,p_client_mac:clientMac||null,p_duration_minutes:Number(durationMinutes),p_speed_profile:speedProfile})
-    if(error) throw error
-    res.status(201).json({session:data,routerLogin:{username:data.access_code,password:data.access_code}})
+    if(!mockRouterEnabled) return res.status(501).json({message:'Physical router activation is not configured yet.'})
+
+    // purchase_voucher is one atomic PostgreSQL transaction: it locks the
+    // wallet, checks the balance/host, deducts the fee, credits host earnings,
+    // logs both transactions, and inserts an active voucher session.
+    const {data:purchasedSession,error}=await dbFor(req).rpc('purchase_voucher',{
+      p_host_id:hostId,
+      p_client_mac:clientMac||null,
+      p_duration_minutes:Number(durationMinutes),
+      p_speed_profile:speedProfile,
+    })
+    if(error){
+      const message=String(error.message||'')
+      if(message.includes('insufficient wallet balance')) return res.status(402).json({message:'Insufficient wallet balance. Add money before buying this voucher.'})
+      if(message.includes('host unavailable')) return res.status(409).json({message:'This hotspot is currently unavailable.'})
+      throw error
+    }
+
+    // Until physical MikroTik provisioning is connected, simulate a successful
+    // activation and replace the internal code with a user-friendly 6-digit PIN.
+    const {session,activation}=await activateMockRouter(purchasedSession)
+    res.status(201).json({
+      session,
+      voucher:session,
+      routerActivation:activation,
+      routerLogin:{username:session.access_code,password:session.access_code},
+    })
   }catch(e){next(e)}
 })
 apiRouter.get('/vouchers/active',requireUser,async(req,res,next)=>{

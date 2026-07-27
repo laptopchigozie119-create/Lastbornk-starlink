@@ -60,7 +60,10 @@ PAYSTACK_SECRET_KEY
 APP_URL=https://YOUR_VERCEL_DOMAIN
 ADMIN_API_KEY
 NETWORK_SHARED_SECRET
+MOCK_ROUTER_ENABLED=true
 ```
+
+With mock router mode enabled, `POST /api/vouchers/purchase` still performs the real atomic Supabase wallet debit and voucher insert, but simulates a successful MikroTik activation and assigns a unique six-digit voucher PIN.
 
 The Supabase URL and publishable key have safe public defaults in the client, but can still be overridden with `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_URL`, and `SUPABASE_PUBLISHABLE_KEY`.
 
