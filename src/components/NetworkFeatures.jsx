@@ -31,7 +31,18 @@ function ChatComposer({ hostId, sessionId, receiverId, authorRole, onSent }) {
   return <div className="composer-wrap">{attachment&&<div className="attachment-chip">{attachment.kind==='image'?<Image/>:<FileText/>}<span>{attachment.name}</span><button onClick={()=>setAttachment(null)}><X/></button></div>}{error&&<p className="form-error">{error}</p>}<form className="chat-compose rich" onSubmit={send}><input value={text} maxLength={2000} onChange={e=>setText(e.target.value)} placeholder={recording?'Recording voice note…':'Type a message…'}/><input ref={inputRef} hidden type="file" accept="image/*,audio/*,video/mp4,video/webm,.pdf,.zip,.doc,.docx,.txt" onChange={e=>e.target.files?.[0]&&upload(e.target.files[0])}/><button type="button" className="compose-tool" title="Attach file" onClick={()=>inputRef.current?.click()}><Paperclip/></button><button type="button" className={`compose-tool ${recording?'recording':''}`} title="Voice note" onClick={toggleRecording}>{recording?<Square/>:<Mic/>}</button><button className="send-button" disabled={busy||(!text.trim()&&!attachment)}>{busy?<Loader2 className="spin"/>:<Send/>}</button></form></div>
 }
 
-function Bubble({ message, mine }) { return <div className={`chat-bubble ${mine?'mine':''}`}><MessageContent message={message}/><small>{new Date(message.timestamp).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</small></div> }
+function isSentByViewer(message, currentUserId, viewerRole) {
+  // Real customer/host accounts are identified by sender_id. In mock mode the
+  // same Supabase identity can act as both parties, so author_role disambiguates
+  // which interface actually sent the message.
+  if (message.sender_id !== message.receiver_id) return message.sender_id === currentUserId
+  return message.author_role === viewerRole
+}
+
+function Bubble({ message, currentUserId, viewerRole }) {
+  const mine = isSentByViewer(message, currentUserId, viewerRole)
+  return <div className={`chat-bubble ${mine?'mine outgoing':'incoming'}`} data-direction={mine?'outgoing':'incoming'}><MessageContent message={message}/><small>{new Date(message.timestamp).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</small></div>
+}
 
 export function MessageHostModal({ session, currentUserId, close }) {
   const [messages,setMessages]=useState([]),[error,setError]=useState('')
@@ -39,7 +50,7 @@ export function MessageHostModal({ session, currentUserId, close }) {
   const load=()=>secureApi(`/api/messages?hostId=${hostId}&sessionId=${sessionId}`).then(setMessages).catch(e=>setError(e.message))
   useEffect(()=>{let channel;load();secureApi('/api/messages/read',{method:'PATCH',body:JSON.stringify({hostId,sessionId})}).catch(()=>{});if(supabase)channel=supabase.channel(`customer-chat:${sessionId}`).on('postgres_changes',{event:'INSERT',schema:'public',table:'messages',filter:`session_id=eq.${sessionId}`},load).subscribe();return()=>{if(channel)supabase.removeChannel(channel)}},[hostId,sessionId])
   const add=row=>setMessages(old=>old.some(m=>m.id===row.id)?old:[...old,row])
-  return <Shell close={close} wide><p className="eyebrow">ACTIVE HOTSPOT</p><h2><MessageCircle size={21}/> Message Host</h2><p>{session.hosts?.business_name||session.hostName}</p><div className="chat-feed">{messages.map(m=><Bubble key={m.id} message={m} mine={m.author_role==='customer'||(m.sender_id===currentUserId&&m.receiver_id!==currentUserId)}/>)}{!messages.length&&!error&&<div className="chat-empty">Ask the host about power, signal, or connection issues.</div>}</div>{error&&<p className="form-error">{error}</p>}<ChatComposer hostId={hostId} sessionId={sessionId} receiverId={receiverId} authorRole="customer" onSent={add}/></Shell>
+  return <Shell close={close} wide><p className="eyebrow">ACTIVE HOTSPOT</p><h2><MessageCircle size={21}/> Message Host</h2><p>{session.hosts?.business_name||session.hostName}</p><div className="chat-feed">{messages.map(m=><Bubble key={m.id} message={m} currentUserId={currentUserId} viewerRole="customer"/>)}{!messages.length&&!error&&<div className="chat-empty">Ask the host about power, signal, or connection issues.</div>}</div>{error&&<p className="form-error">{error}</p>}<ChatComposer hostId={hostId} sessionId={sessionId} receiverId={receiverId} authorRole="customer" onSent={add}/></Shell>
 }
 
 export function HostInbox({ currentUserId }) {
@@ -50,7 +61,7 @@ export function HostInbox({ currentUserId }) {
   const room=rooms.find(r=>r.key===selected),roomMessages=room?messages.filter(m=>m.session_id===room.sessionId).sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp)):[]
   const choose=async key=>{setSelected(key);const chosen=rooms.find(r=>r.key===key);if(chosen)secureApi('/api/messages/read',{method:'PATCH',body:JSON.stringify({hostId:chosen.hostId,sessionId:chosen.sessionId})}).then(load).catch(()=>{})}
   const add=row=>setMessages(old=>[row,...old.filter(m=>m.id!==row.id)])
-  return <div className="inbox-layout"><aside><h3><Inbox/> Inbox</h3>{rooms.map(r=><button key={r.key} className={selected===r.key?'active':''} onClick={()=>choose(r.key)}><span className="avatar">{r.guest.slice(0,2).toUpperCase()}</span><span><b>Customer · {r.last.attachment_name?'Attachment':'Message'}</b><small>{r.last.text||r.last.attachment_name||'Media message'}</small></span>{r.unread>0&&<i>{r.unread}</i>}</button>)}{!rooms.length&&!error&&<div className="chat-empty">No customer messages yet.</div>}</aside><section>{error&&<p className="form-error">{error}</p>}{room?<><div className="chat-feed">{roomMessages.map(m=><Bubble key={m.id} message={m} mine={m.author_role==='host'||(m.sender_id===currentUserId&&m.receiver_id!==currentUserId)}/>)}</div><ChatComposer hostId={room.hostId} sessionId={room.sessionId} receiverId={room.guest} authorRole="host" onSent={add}/></>:<div className="chat-empty"><MessageCircle/><p>Select a customer conversation</p></div>}</section></div>
+  return <div className="inbox-layout"><aside><h3><Inbox/> Inbox</h3>{rooms.map(r=><button key={r.key} className={selected===r.key?'active':''} onClick={()=>choose(r.key)}><span className="avatar">{r.guest.slice(0,2).toUpperCase()}</span><span><b>Customer · {r.last.attachment_name?'Attachment':'Message'}</b><small>{r.last.text||r.last.attachment_name||'Media message'}</small></span>{r.unread>0&&<i>{r.unread}</i>}</button>)}{!rooms.length&&!error&&<div className="chat-empty">No customer messages yet.</div>}</aside><section>{error&&<p className="form-error">{error}</p>}{room?<><div className="chat-feed">{roomMessages.map(m=><Bubble key={m.id} message={m} currentUserId={currentUserId} viewerRole="host"/>)}</div><ChatComposer hostId={room.hostId} sessionId={room.sessionId} receiverId={room.guest} authorRole="host" onSent={add}/></>:<div className="chat-empty"><MessageCircle/><p>Select a customer conversation</p></div>}</section></div>
 }
 
 export function SupportModal({ activeSession, close }) {
