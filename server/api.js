@@ -137,6 +137,27 @@ apiRouter.get('/transactions', requireUser, async (req, res, next) => {
   try { ensure(); const { data, error } = await dbFor(req).from('transactions').select('*').eq('user_id', req.user.id).order('created_at', { ascending: false }).limit(50); if (error) throw error; res.json(data) } catch (e) { next(e) }
 })
 
+apiRouter.patch('/profile', requireUser, async (req,res,next)=>{
+  try{
+    ensure();const name=String(req.body.name||'').trim(),phone=String(req.body.phone||'').trim(),email=String(req.body.email||'').trim()
+    if(name.length<2||name.length>80)return res.status(400).json({message:'Name must be between 2 and 80 characters.'})
+    const update={name};if(phone)update.phone=phone;if(email)update.email=email
+    const{data,error}=await dbFor(req).from('users').update(update).eq('id',req.user.id).select('*').single();if(error)throw error
+    if(adminConfigured){await supabaseAdmin.auth.admin.updateUserById(req.user.id,{user_metadata:{name},...(email?{email}:{})})}
+    res.json({...data,balance:Number(data.wallet_balance)})
+  }catch(e){next(e)}
+})
+
+apiRouter.get('/payments/methods',requireUser,async(req,res,next)=>{
+  try{
+    ensure();if(!adminConfigured)throw Object.assign(new Error('SUPABASE_SECRET_KEY is required for payment methods.'),{status:503})
+    const{data,error}=await supabaseAdmin.from('payment_intents').select('id,provider,provider_payload,paid_at').eq('user_id',req.user.id).eq('status','successful').order('paid_at',{ascending:false}).limit(25);if(error)throw error
+    const seen=new Set(),methods=[]
+    for(const row of data||[]){const auth=row.provider_payload?.authorization;if(!auth?.last4)continue;const fingerprint=auth.signature||`${auth.bin}:${auth.last4}:${auth.exp_month}:${auth.exp_year}`;if(seen.has(fingerprint))continue;seen.add(fingerprint);methods.push({id:row.id,provider:row.provider||'paystack',brand:auth.brand||auth.card_type||'Card',last4:auth.last4,bank:auth.bank||'',expMonth:auth.exp_month||'',expYear:auth.exp_year||'',reusable:Boolean(auth.reusable)})}
+    res.json(methods)
+  }catch(e){next(e)}
+})
+
 apiRouter.get('/hosts/mine', requireUser, async (req,res,next)=>{
   try{ensure();const{data,error}=await dbFor(req).from('hosts').select('*').eq('user_id',req.user.id).maybeSingle();if(error)throw error;res.json(data)}catch(e){next(e)}
 })

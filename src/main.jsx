@@ -9,16 +9,20 @@ import {
 import './styles.css'
 import './network-features.css'
 import './mock-system.css'
+import './profile-drawer.css'
 import { HostInbox, MessageHostModal, ProductionTopUp, SupportModal } from './components/NetworkFeatures'
 import { MockConnection } from './components/MockConnection'
 import { NotificationPanel } from './components/NotificationPanel'
+import { ProfileDrawer } from './components/ProfileDrawer'
 import { secureApi, supabase } from './lib/supabase'
 import { getCurrentPosition } from './lib/location'
 import { submitRouterLogin } from './lib/captive'
 import { normalizeNigerianPhone } from './lib/phone'
 
+const getCachedProfile = () => { try { return JSON.parse(localStorage.getItem('lastbornk_profile_cache') || 'null') } catch { return null } }
+const CACHED_PROFILE = getCachedProfile()
 const EMPTY_DASHBOARD = {
-  user: { id: '', name: 'Lastbornk user', balance: 0, wallet_balance: 0 },
+  user: CACHED_PROFILE ? {...CACHED_PROFILE,balance:Number(CACHED_PROFILE.wallet_balance??CACHED_PROFILE.balance)} : { id: '', name: 'Lastbornk user', balance: null, wallet_balance: null },
   nearby: [],
   bookings: [],
   transactions: [],
@@ -37,19 +41,22 @@ const api = async (url, options) => {
 function Logo({ compact = false }) {
   return <div className="logo"><span className="logo-mark"><Wifi size={20}/></span>{!compact && <span>lastborn<span>k</span></span>}</div>
 }
+const userInitials = name => String(name||'LB').split(/\s+/).filter(Boolean).slice(0,2).map(part=>part[0]).join('').toUpperCase()
 
 function App() {
   const [page, setPage] = useState('home')
   const [dashboard, setDashboard] = useState(EMPTY_DASHBOARD)
   const [hosts, setHosts] = useState([])
   const [bookings, setBookings] = useState([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(!CACHED_PROFILE)
+  const [balanceHydrating, setBalanceHydrating] = useState(true)
   const [modal, setModal] = useState(null)
   const [toast, setToast] = useState(null)
   const [notifications, setNotifications] = useState(() => {
     try { return JSON.parse(localStorage.getItem('lastbornk_notifications') || '[]') } catch { return [] }
   })
   const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
   const seenTransactionIds = useRef(new Set())
   const [role, setRole] = useState('customer')
 
@@ -57,17 +64,29 @@ function App() {
     setToast({ message, type })
     setTimeout(() => setToast(null), 3200)
     if (type === 'success' && kind) {
+      let preferences={notifications:true,connectionAlerts:true};try{preferences={...preferences,...JSON.parse(localStorage.getItem('lastbornk_preferences')||'{}')}}catch{/* Use defaults. */}
+      if(!preferences.notifications||(kind==='connection'&&!preferences.connectionAlerts))return
       const titles = { deposit: 'Deposit successful', voucher: 'Voucher purchased', connection: 'Connection update' }
       setNotifications(current => [{ id: crypto.randomUUID(), title: titles[kind] || 'Lastbornk update', message, kind, read: false, createdAt: new Date().toISOString() }, ...current].slice(0, 50))
     }
   }, [])
 
   const load = async () => {
-    setLoading(true)
+    if(!dashboard?.user?.id)setLoading(true)
+    setBalanceHydrating(true)
     try {
       if (supabase) {
-        const [profile, transactions, activeSessions, ownHost] = await Promise.all([secureApi('/api/me'), secureApi('/api/transactions'), secureApi('/api/vouchers/active'), secureApi('/api/hosts/mine')])
+        // Hydrate the real wallet first. Ancillary requests are isolated so a
+        // chat, host, or session failure can never replace the balance with ₦0.
+        const profile=await secureApi('/api/me')
         const user={...profile,balance:Number(profile.wallet_balance)}
+        localStorage.setItem('lastbornk_profile_cache',JSON.stringify(user))
+        setDashboard(current=>({...current,user}))
+        setBalanceHydrating(false)
+        const results=await Promise.allSettled([secureApi('/api/transactions'),secureApi('/api/vouchers/active'),secureApi('/api/hosts/mine')])
+        const transactions=results[0].status==='fulfilled'?results[0].value:[]
+        const activeSessions=results[1].status==='fulfilled'?results[1].value:[]
+        const ownHost=results[2].status==='fulfilled'?results[2].value:null
         const txs=(transactions||[]).map(t=>({...t,date:t.created_at,label:t.type.replaceAll('_',' '),type:['wallet_credit','host_earning','refund'].includes(t.type)?'credit':'debit'}))
         const own=ownHost?[{...ownHost,ownerId:ownHost.user_id,name:ownHost.business_name,area:ownHost.address||'Your hotspot',price:Number(ownHost.voucher_fee),speed:ownHost.speed_mbps,distance:0,rating:5,reviews:0,spots:ownHost.capacity,online:ownHost.is_online,verified:ownHost.verified,avatar:ownHost.business_name.slice(0,2).toUpperCase(),production:true}]:[]
         let analytics=null
@@ -82,7 +101,7 @@ function App() {
       setHosts(current => Array.isArray(current) ? current : [])
       setBookings(current => Array.isArray(current) ? current : [])
       notify(e.message, 'error')
-    } finally { setLoading(false) }
+    } finally { setLoading(false);setBalanceHydrating(false) }
   }
   useEffect(() => { load() }, [])
   useEffect(() => { localStorage.setItem('lastbornk_notifications', JSON.stringify(notifications)) }, [notifications])
@@ -97,20 +116,20 @@ function App() {
     ? [{id:'home',label:'Overview',icon:Home},{id:'explore',label:'My listing',icon:Radio},{id:'messages',label:'Inbox',icon:MessageCircle},{id:'activity',label:'Bookings',icon:Activity},{id:'profile',label:'Account',icon:UserRound}]
     : [{id:'home',label:'Home',icon:Home},{id:'explore',label:'Find WiFi',icon:Search},{id:'activity',label:'Activity',icon:Activity},{id:'profile',label:'Account',icon:UserRound}]
 
-  const pageProps = { user, dashboard: safeDashboard, hosts: hosts || [], bookings: bookings || [], setPage, setModal, notify, reload: load, role }
+  const pageProps = { user, dashboard: safeDashboard, hosts: hosts || [], bookings: bookings || [], setPage, setModal, notify, reload: load, role, balanceHydrating, openProfile:()=>setProfileOpen(true) }
   return <div className="app-shell">
     <aside className="sidebar">
       <Logo/>
       <nav>{nav.map(({id,label,icon:Icon}) => <button key={id} className={page===id?'active':''} onClick={()=>setPage(id)}><Icon size={20}/><span>{label}</span></button>)}</nav>
       <div className="side-spacer"/>
       <button className="support"><CircleHelp size={20}/> Help & support</button>
-      <div className="user-mini"><div className="avatar">TA</div><div><b>{user.name}</b><small>{role === 'owner' ? 'Starlink owner' : 'Customer'}</small></div><ChevronRight size={18}/></div>
+      <div className="user-mini" role="button" tabIndex="0" onClick={()=>setProfileOpen(true)}><div className="avatar">{userInitials(user.name)}</div><div><b>{user.name}</b><small>{role === 'owner' ? 'Starlink owner' : 'Customer'}</small></div><ChevronRight size={18}/></div>
     </aside>
     <main className="main">
       <header>
         <button className="mobile-logo"><Logo compact/></button>
         <div className="role-switch"><button className={role==='customer'?'selected':''} onClick={()=>{setRole('customer');setPage('home')}}>Find internet</button><button className={role==='owner'?'selected':''} onClick={()=>{setRole('owner');setPage('home')}}>Host dashboard</button></div>
-        <div className="header-actions"><button className="icon-btn" aria-label="Open notifications" onClick={()=>setNotificationsOpen(open=>!open)}><Bell size={20}/>{notifications.some(item=>!item.read)&&<i/>}</button><div className="avatar">TA</div></div>
+        <div className="header-actions"><button className="icon-btn" aria-label="Open notifications" onClick={()=>setNotificationsOpen(open=>!open)}><Bell size={20}/>{notifications.some(item=>!item.read)&&<i/>}</button><button className="avatar profile-trigger" aria-label="Open profile and settings" onClick={()=>setProfileOpen(true)}>{userInitials(user.name)}</button></div>
       </header>
       <div className="page-wrap">
         {page === 'home' && (role === 'customer' ? <HomePage {...pageProps}/> : <OwnerHome {...pageProps}/>)}
@@ -128,19 +147,20 @@ function App() {
     {modal?.type === 'confirmed' && <ConfirmedModal booking={modal.booking} close={()=>setModal(null)} onViewDashboard={()=>{setModal(null);setRole('customer');setPage('activity')}}/>}
     {modal?.type === 'host' && <HostModal close={()=>setModal(null)} success={()=>{setModal(null);notify('Your hotspot is now listed');load()}}/>}
     {notificationsOpen&&<NotificationPanel notifications={notifications} close={()=>setNotificationsOpen(false)} markAllRead={()=>setNotifications(items=>items.map(item=>({...item,read:true})))} clearAll={()=>setNotifications([])}/>}
+    {profileOpen&&<ProfileDrawer user={user} close={()=>setProfileOpen(false)} notify={notify} onSupport={()=>setModal({type:'support'})} onAddMoney={()=>setModal({type:'topup'})} onUpdated={(updated)=>{if(!updated)return;setDashboard(current=>({...current,user:{...current.user,...updated,balance:Number(updated.wallet_balance??updated.balance)}}));localStorage.setItem('lastbornk_profile_cache',JSON.stringify(updated))}}/>}
     {toast && <div className={`toast ${toast.type}`}><span>{toast.type==='error'?<X size={17}/>:<Check size={17}/>}</span>{toast.message}</div>}
   </div>
 }
 
 function SectionTitle({ title, action, onClick }) { return <div className="section-title"><h2>{title}</h2>{action&&<button onClick={onClick}>{action}<ArrowRight size={16}/></button>}</div> }
 
-function HomePage({ user, dashboard, setPage, setModal }) {
+function HomePage({ user, dashboard, setPage, setModal, balanceHydrating }) {
   return <>
     <div className="welcome"><div><p className="eyebrow">FRIDAY, 24 JULY</p><h1>Good afternoon, Tomi <span>👋</span></h1><p>Ready to get connected?</p></div><button className="primary desktop-cta" onClick={()=>setPage('explore')}><Search size={19}/> Find nearby WiFi</button></div>
     <section className="wallet-card">
       <div className="wallet-orb orb-one"/><div className="wallet-orb orb-two"/>
       <div className="wallet-head"><span><Wallet size={18}/> LASTBORNK WALLET</span><button><ShieldCheck size={17}/> Secured</button></div>
-      <div className="balance-label">Available balance</div><div className="balance">{money(user.balance)}<small>.00</small></div>
+      <div className="balance-label">Available balance {balanceHydrating&&<span className="balance-sync"><Loader2 className="spin"/> Syncing</span>}</div><div className={`balance ${user.balance==null?'balance-skeleton':''}`}>{user.balance==null?<span/>:<>{money(user.balance)}<small>.00</small></>}</div>
       <div className="wallet-actions"><button onClick={()=>setModal({type:'topup'})}><span><Plus size={19}/></span>Add money</button><button onClick={()=>setPage('activity')}><span><Activity size={19}/></span>Transactions</button></div>
     </section>
     <button className="find-banner" onClick={()=>setPage('explore')}><span className="find-icon"><Navigation size={24}/></span><span><b>Find Starlink near you</b><small>Fast, reliable internet is closer than you think</small></span><ChevronRight/></button>
@@ -208,9 +228,9 @@ function OwnerListing({ hosts = [], user, setModal, notify, reload }) {
   {listing?<div className="listing-detail"><div className="listing-status"><div><span className={listing.online?'live-dot':''}/><b>{listing.online?'Your hotspot is live':'Your hotspot is paused'}</b><p>{listing.online?'Customers nearby can discover and book it.':'Your listing is hidden from customers.'}</p></div><button className={`switch ${listing.online?'on':''}`} onClick={toggle}><i/></button></div><HostCard host={listing} onBook={()=>{}}/><div className="settings-grid"><div><span><CreditCard/></span><p>Hourly price</p><b>{money(listing.price)}</b></div><div><span><Users/></span><p>Guest capacity</p><b>{listing.spots} available</b></div><div><span><Gauge/></span><p>Advertised speed</p><b>{listing.speed} Mbps</b></div></div><button className="secondary wide" onClick={()=>setModal({type:'host'})}><Settings size={18}/> Edit listing details</button></div>:<div className="owner-empty"><Radio/><h3>No hotspot yet</h3><p>Create your first listing to start earning.</p></div>}</>
 }
 
-function ProfilePage({ user, role, setModal }) {
-  return <><div className="page-heading"><p className="eyebrow">SETTINGS</p><h1>Account</h1><p>Manage your profile, payments and security.</p></div><div className="profile-card"><div className="profile-head"><div className="avatar large">TA</div><div><h2>{user.name}</h2><p>{user.email}</p><span><BadgeCheck size={15}/> Identity verified</span></div><button className="secondary">Edit profile</button></div></div>
-  <div className="settings-list"><button onClick={()=>setModal({type:'topup'})}><span><Wallet/></span><div><b>Wallet & payments</b><small>Balance: {money(user.balance)}</small></div><ChevronRight/></button><button><span><ShieldCheck/></span><div><b>Security & privacy</b><small>Password, identity and data</small></div><ChevronRight/></button><button><span><Bell/></span><div><b>Notifications</b><small>Bookings, payments and offers</small></div><ChevronRight/></button>{role==='owner'&&<button><span><Store/></span><div><b>Host verification</b><small>Complete your owner profile</small></div><ChevronRight/></button>}<button onClick={()=>setModal({type:'support'})}><span><CircleHelp/></span><div><b>Help & support</b><small>Open a customer care ticket</small></div><ChevronRight/></button><button className="danger"><span><LogOut/></span><div><b>Log out</b><small>Sign out of this device</small></div><ChevronRight/></button></div><p className="version">Lastbornk v1.0.0 · Made with care in Nigeria 🇳🇬</p></>
+function ProfilePage({ user, role, setModal, openProfile }) {
+  return <><div className="page-heading"><p className="eyebrow">SETTINGS</p><h1>Account</h1><p>Manage your profile, payments and security.</p></div><div className="profile-card"><div className="profile-head"><div className="avatar large">TA</div><div><h2>{user.name}</h2><p>{user.email}</p><span><BadgeCheck size={15}/> Identity verified</span></div><button className="secondary" onClick={openProfile}>Edit profile</button></div></div>
+  <div className="settings-list"><button onClick={()=>setModal({type:'topup'})}><span><Wallet/></span><div><b>Wallet & payments</b><small>Balance: {money(user.balance)}</small></div><ChevronRight/></button><button onClick={openProfile}><span><ShieldCheck/></span><div><b>Security & privacy</b><small>Password, identity and data</small></div><ChevronRight/></button><button onClick={openProfile}><span><Bell/></span><div><b>Notifications</b><small>Bookings, payments and offers</small></div><ChevronRight/></button>{role==='owner'&&<button><span><Store/></span><div><b>Host verification</b><small>Complete your owner profile</small></div><ChevronRight/></button>}<button onClick={()=>setModal({type:'support'})}><span><CircleHelp/></span><div><b>Help & support</b><small>Open a customer care ticket</small></div><ChevronRight/></button><button className="danger"><span><LogOut/></span><div><b>Log out</b><small>Sign out of this device</small></div><ChevronRight/></button></div><p className="version">Lastbornk v1.0.0 · Made with care in Nigeria 🇳🇬</p></>
 }
 
 function Modal({ children, close, size='' }) { return <div className="modal-backdrop" onMouseDown={e=>e.target===e.currentTarget&&close()}><div className={`modal ${size}`}><button className="modal-close" onClick={close}><X/></button>{children}</div></div> }
