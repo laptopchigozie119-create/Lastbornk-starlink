@@ -10,7 +10,11 @@ export const apiRouter = express.Router()
 const ensure = () => { if (!configured) throw Object.assign(new Error('Supabase is not configured. Copy .env.example to .env.'), { status: 503 }) }
 const dbFor = (req) => req.accessToken ? userClient(req.accessToken) : supabaseAdmin
 const validMac = (value) => !value || /^([0-9A-F]{2}:){5}[0-9A-F]{2}$/i.test(value)
-const mockRouterEnabled = process.env.MOCK_ROUTER_ENABLED !== 'false'
+// Physical provisioning requires an explicit two-variable opt-in. This keeps the
+// working simulation active even if an old Vercel deployment accidentally has
+// MOCK_ROUTER_ENABLED=false. Real hardware starts only when both settings agree.
+const physicalRouterLive = process.env.PHYSICAL_ROUTER_LIVE === 'true'
+const mockRouterEnabled = process.env.MOCK_ROUTER_ENABLED !== 'false' || !physicalRouterLive
 const CHAT_BUCKET = 'chat-attachments'
 const chatUpload = multer({
   storage: multer.memoryStorage(),
