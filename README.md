@@ -29,7 +29,7 @@ Without Supabase keys, the original JSON demo remains available. With configured
 
 ## Setup guides
 
-Read **[PRODUCTION_SETUP.md](./PRODUCTION_SETUP.md)** before connecting live credentials. For real MikroTik/FreeRADIUS or controller provisioning, apply `supabase/migrations/004_hardware_integration.sql` and follow **[HARDWARE_SETUP.md](./HARDWARE_SETUP.md)**.
+Read **[PRODUCTION_SETUP.md](./PRODUCTION_SETUP.md)** before connecting live credentials. For a free Windows laptop/phone portal simulation, follow **[LOCAL_CAPTIVE_TEST.md](./LOCAL_CAPTIVE_TEST.md)**. For real MikroTik/FreeRADIUS or controller provisioning, apply `supabase/migrations/004_hardware_integration.sql` and follow **[HARDWARE_SETUP.md](./HARDWARE_SETUP.md)**.
 
 Key files:
 

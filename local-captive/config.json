@@ -1,0 +1,6 @@
+{
+  "appUrl": "https://YOUR-VERCEL-DOMAIN",
+  "supabaseUrl": "https://spfbxjshmeshxvndpvqz.supabase.co",
+  "supabasePublishableKey": "sb_publishable_FBVszbiIY1TDuS6Ncf3EAw_63jvQoGG",
+  "port": 8787
+}

@@ -331,6 +331,20 @@ async function calculateAndPersistUsage(session) {
   return nextMetadata
 }
 
+apiRouter.post('/captive/claim',requireUser,async(req,res,next)=>{
+  try{
+    ensure();if(!mockRouterEnabled)return res.status(404).json({message:'Local captive testing is disabled.'})
+    const pin=String(req.body.pin||'').replace(/\D/g,'')
+    if(!/^\d{6}$/.test(pin))return res.status(400).json({message:'Enter the six-digit voucher PIN.'})
+    if(!adminConfigured)throw Object.assign(new Error('SUPABASE_SECRET_KEY is required for captive testing.'),{status:503})
+    const{data:session,error}=await supabaseAdmin.from('vouchers_sessions').select('*, hosts!inner(business_name,address,is_online)').eq('user_id',req.user.id).eq('access_code',pin).in('status',['active','used']).gt('expires_at',new Date().toISOString()).single()
+    if(error||!session)return res.status(401).json({message:'PIN is invalid, expired, or belongs to another account.'})
+    if(!session.hosts.is_online)return res.status(409).json({message:'This hotspot is currently offline.'})
+    const{data:connected,error:updateError}=await supabaseAdmin.from('vouchers_sessions').update({status:'used'}).eq('id',session.id).select('*').single();if(updateError)throw updateError
+    res.json({success:true,simulated:true,session:{id:connected.id,pin:connected.access_code,status:'connected',speedProfile:connected.speed_limit_profile,expiresAt:connected.expires_at},host:{name:session.hosts.business_name,address:session.hosts.address}})
+  }catch(e){next(e)}
+})
+
 apiRouter.get('/vouchers/active',requireUser,async(req,res,next)=>{
   try{ensure();const{data,error}=await dbFor(req).from('vouchers_sessions').select('*, hosts(business_name,user_id,address)').eq('user_id',req.user.id).in('status',['active','used']).gt('expires_at',new Date().toISOString()).order('created_at',{ascending:false});if(error)throw error;res.json(data||[])}catch(e){next(e)}
 })
