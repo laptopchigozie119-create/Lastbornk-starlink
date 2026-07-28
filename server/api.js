@@ -1,6 +1,8 @@
 import express from 'express'
 import crypto from 'node:crypto'
 import multer from 'multer'
+import dns from 'node:dns/promises'
+import net from 'node:net'
 import { requireAdmin, requireUser } from './auth.js'
 import { adminConfigured, configured, supabaseAdmin, userClient } from './supabase.js'
 
@@ -19,6 +21,17 @@ const chatUpload = multer({
     done(allowed ? null : Object.assign(new Error('Unsupported attachment type.'), { status: 415 }), allowed)
   },
 })
+
+const credentialsKey = () => {
+  const raw=process.env.ROUTER_CREDENTIALS_KEY
+  if(!raw)throw Object.assign(new Error('ROUTER_CREDENTIALS_KEY is not configured.'),{status:503})
+  const decoded=Buffer.from(raw,'base64')
+  return decoded.length===32?decoded:crypto.createHash('sha256').update(raw).digest()
+}
+const encryptSecret = value => {if(!value)return null;const iv=crypto.randomBytes(12),cipher=crypto.createCipheriv('aes-256-gcm',credentialsKey(),iv);const encrypted=Buffer.concat([cipher.update(value,'utf8'),cipher.final()]);return [iv.toString('base64'),cipher.getAuthTag().toString('base64'),encrypted.toString('base64')].join('.')}
+const decryptSecret = value => {if(!value)return '';const[iv,tag,data]=value.split('.').map(v=>Buffer.from(v,'base64'));const decipher=crypto.createDecipheriv('aes-256-gcm',credentialsKey(),iv);decipher.setAuthTag(tag);return Buffer.concat([decipher.update(data),decipher.final()]).toString('utf8')}
+const isPrivateIp = ip => net.isIP(ip)&&(ip==='127.0.0.1'||ip==='::1'||ip.startsWith('10.')||ip.startsWith('192.168.')||ip.startsWith('169.254.')||/^172\.(1[6-9]|2\d|3[01])\./.test(ip)||ip.startsWith('fc')||ip.startsWith('fd'))
+async function validateControllerUrl(value){const url=new URL(value);if(url.protocol!=='https:')throw Object.assign(new Error('Controller URL must use HTTPS.'),{status:400});const addresses=await dns.lookup(url.hostname,{all:true});if(!addresses.length||addresses.some(item=>isPrivateIp(item.address)))throw Object.assign(new Error('Controller URL must resolve to a public address. Use RADIUS for private routers.'),{status:400});return url.toString()}
 
 export const generateVoucherPin = () => String(crypto.randomInt(100000, 1000000))
 
@@ -43,18 +56,25 @@ async function assignMockVoucherPin(sessionId) {
   throw Object.assign(new Error('Could not allocate a unique voucher PIN. Please retry.'), { status: 503 })
 }
 
-async function activateMockRouter(session) {
-  if (!mockRouterEnabled) throw Object.assign(new Error('Physical router activation is not configured yet.'), { status: 501 })
-  const activatedSession = await assignMockVoucherPin(session.id)
-  return {
-    session: activatedSession,
-    activation: {
-      success: true,
-      simulated: true,
-      provider: 'mock-mikrotik',
-      activatedAt: new Date().toISOString(),
-      message: 'Mock router activated successfully.',
-    },
+async function activateRouter(session,hostId) {
+  const activatedSession=await assignMockVoucherPin(session.id)
+  if(mockRouterEnabled)return{session:activatedSession,activation:{success:true,simulated:true,provider:'mock-mikrotik',activatedAt:new Date().toISOString(),message:'Mock router activated successfully.'}}
+
+  const{data:config,error}=await supabaseAdmin.from('hardware_configs').select('*').eq('host_id',hostId).eq('enabled',true).single()
+  if(error)throw Object.assign(new Error('No enabled physical-router configuration exists for this hotspot.'),{status:409})
+  const payload={event:'voucher.activate',jobVersion:1,hostId,routerIdentity:config.router_identity,sessionId:activatedSession.id,pin:activatedSession.access_code,clientMac:activatedSession.client_mac,speedProfile:activatedSession.speed_limit_profile,startsAt:activatedSession.starts_at,expiresAt:activatedSession.expires_at}
+  const{data:job,error:jobError}=await supabaseAdmin.from('router_provision_jobs').upsert({host_id:hostId,session_id:activatedSession.id,hardware_config_id:config.id,status:config.integration_mode==='radius'?'ready':'pending',payload},{onConflict:'session_id'}).select().single();if(jobError)throw jobError
+
+  if(config.integration_mode==='radius')return{session:activatedSession,activation:{success:true,simulated:false,provider:'radius',jobId:job.id,status:'ready',message:'Voucher is ready for RADIUS authentication.'}}
+  try{
+    const secret=decryptSecret(config.encrypted_secret),body=JSON.stringify(payload),signature=crypto.createHmac('sha256',secret).update(body).digest('hex')
+    const response=await fetch(config.controller_url,{method:'POST',headers:{'content-type':'application/json','x-lastbornk-signature':signature,'x-lastbornk-router':config.router_identity,...(config.api_username?{'x-lastbornk-user':config.api_username}:{})},body,signal:AbortSignal.timeout(8000)})
+    if(!response.ok)throw new Error(`Controller returned HTTP ${response.status}`)
+    await supabaseAdmin.from('router_provision_jobs').update({status:'delivered',attempts:1,delivered_at:new Date().toISOString(),updated_at:new Date().toISOString()}).eq('id',job.id)
+    return{session:activatedSession,activation:{success:true,simulated:false,provider:'controller_webhook',jobId:job.id,status:'delivered',message:'Voucher delivered to the router controller.'}}
+  }catch(cause){
+    await supabaseAdmin.from('router_provision_jobs').update({status:'failed',attempts:1,last_error:String(cause.message).slice(0,500),updated_at:new Date().toISOString()}).eq('id',job.id)
+    return{session:activatedSession,activation:{success:false,simulated:false,provider:'controller_webhook',jobId:job.id,status:'failed',message:'Voucher saved, but controller delivery failed. Retry from the host dashboard.'}}
   }
 }
 
@@ -126,6 +146,7 @@ apiRouter.post('/network/authorize', async (req,res,next)=>{
     if(session.client_mac&&callingStationId&&String(session.client_mac).toLowerCase()!==String(callingStationId).replace(/-/g,':').toLowerCase())return res.status(401).json({accept:false})
     if(!session.client_mac&&callingStationId&&validMac(String(callingStationId).replace(/-/g,':')))await supabaseAdmin.from('vouchers_sessions').update({client_mac:String(callingStationId).replace(/-/g,':')}).eq('id',session.id)
     const seconds=Math.max(1,Math.floor((new Date(session.expires_at)-Date.now())/1000))
+    await Promise.all([supabaseAdmin.from('hardware_configs').update({last_seen_at:new Date().toISOString(),last_error:null}).eq('host_id',session.host_id),supabaseAdmin.from('router_provision_jobs').update({status:'delivered',delivered_at:new Date().toISOString(),updated_at:new Date().toISOString()}).eq('session_id',session.id)])
     res.json({'control:Auth-Type':{'type':'string','value':['Accept']},'reply:Mikrotik-Rate-Limit':{'type':'string','value':[session.speed_limit_profile]},'reply:Session-Timeout':{'type':'integer','value':[seconds]},'control:Simultaneous-Use':{'type':'integer','value':[1]}})
   }catch(e){next(e)}
 })
@@ -161,6 +182,25 @@ apiRouter.get('/payments/methods',requireUser,async(req,res,next)=>{
 apiRouter.get('/hosts/mine', requireUser, async (req,res,next)=>{
   try{ensure();const{data,error}=await dbFor(req).from('hosts').select('*').eq('user_id',req.user.id).maybeSingle();if(error)throw error;res.json(data)}catch(e){next(e)}
 })
+apiRouter.get('/hardware/config',requireUser,async(req,res,next)=>{
+  try{ensure();if(!adminConfigured)throw Object.assign(new Error('SUPABASE_SECRET_KEY is required for hardware configuration.'),{status:503});const{data:host,error:hostError}=await supabaseAdmin.from('hosts').select('id').eq('user_id',req.user.id).single();if(hostError)throw hostError;const{data,error}=await supabaseAdmin.from('hardware_configs').select('id,host_id,router_type,integration_mode,router_address,controller_url,router_identity,api_username,enabled,last_seen_at,last_error,updated_at').eq('host_id',host.id).maybeSingle();if(error)throw error;res.json(data)}catch(e){next(e)}
+})
+apiRouter.put('/hardware/config',requireUser,async(req,res,next)=>{
+  try{
+    ensure();if(!adminConfigured)throw Object.assign(new Error('SUPABASE_SECRET_KEY is required for hardware configuration.'),{status:503})
+    const{data:host,error:hostError}=await supabaseAdmin.from('hosts').select('id').eq('user_id',req.user.id).single();if(hostError)throw hostError
+    const routerType=String(req.body.routerType||'mikrotik'),mode=String(req.body.integrationMode||'radius'),identity=String(req.body.routerIdentity||'').trim()
+    if(!['mikrotik','openwrt','unifi','other'].includes(routerType)||!['radius','controller_webhook'].includes(mode)||!identity)return res.status(400).json({message:'Valid router type, integration mode and router identity are required.'})
+    const controllerUrl=mode==='controller_webhook'?await validateControllerUrl(req.body.controllerUrl):null
+    let encryptedSecret
+    if(req.body.apiSecret)encryptedSecret=encryptSecret(String(req.body.apiSecret))
+    const values={host_id:host.id,router_type:routerType,integration_mode:mode,router_address:String(req.body.routerAddress||'').trim()||null,controller_url:controllerUrl,router_identity:identity,api_username:String(req.body.apiUsername||'').trim()||null,enabled:Boolean(req.body.enabled),updated_at:new Date().toISOString(),...(encryptedSecret?{encrypted_secret:encryptedSecret}:{})}
+    const{data,error}=await supabaseAdmin.from('hardware_configs').upsert(values,{onConflict:'host_id'}).select('id,host_id,router_type,integration_mode,router_address,controller_url,router_identity,api_username,enabled,last_seen_at,last_error,updated_at').single();if(error)throw error
+    await supabaseAdmin.from('hosts').update({router_identity:identity}).eq('id',host.id)
+    res.json(data)
+  }catch(e){if(['42P01','PGRST204'].includes(e.code))return res.status(503).json({message:'Apply migration 004_hardware_integration.sql in Supabase first.'});next(e)}
+})
+
 apiRouter.post('/hosts', requireUser, async (req,res,next)=>{
   try{ensure();const h=req.body;if(!h.businessName||!validMac(h.routerMac)||!Number.isFinite(Number(h.latitude))||!Number.isFinite(Number(h.longitude)))return res.status(400).json({message:'Business name, router MAC and valid coordinates are required.'});const{data,error}=await dbFor(req).from('hosts').insert({user_id:req.user.id,business_name:h.businessName,latitude:Number(h.latitude),longitude:Number(h.longitude),address:h.address,router_mac:h.routerMac,voucher_fee:Number(h.voucherFee||300),speed_mbps:Number(h.speedMbps||50),capacity:Number(h.capacity||10),is_online:Boolean(h.isOnline)}).select().single();if(error)throw error;res.status(201).json(data)}catch(e){next(e)}
 })
@@ -182,13 +222,12 @@ apiRouter.post('/vouchers/purchase', requireUser, async (req,res,next)=>{
     ensure()
     const {hostId,clientMac,durationMinutes=60,speedProfile='5M/5M'}=req.body
     if(!hostId||!validMac(clientMac)) return res.status(400).json({message:'A valid host and client MAC address are required.'})
-    if(!mockRouterEnabled) return res.status(501).json({message:'Physical router activation is not configured yet.'})
-
     const minutes=Number(durationMinutes)
     if(!Number.isInteger(minutes)||minutes<15||minutes>1440)return res.status(400).json({message:'Voucher duration must be between 15 minutes and 24 hours.'})
     if(!adminConfigured)throw Object.assign(new Error('SUPABASE_SECRET_KEY is required for voucher purchases.'),{status:503})
     const{data:host,error:hostError}=await supabaseAdmin.from('hosts').select('*').eq('id',hostId).single()
     if(hostError)throw hostError
+    if(!mockRouterEnabled){const{data:hardware,error:hardwareError}=await supabaseAdmin.from('hardware_configs').select('id').eq('host_id',hostId).eq('enabled',true).maybeSingle();if(hardwareError)throw hardwareError;if(!hardware)return res.status(409).json({message:'This host has not enabled physical router provisioning yet.'})}
 
     let purchasedSession
     if(host.user_id===req.user.id){
@@ -213,7 +252,7 @@ apiRouter.post('/vouchers/purchase', requireUser, async (req,res,next)=>{
     }
 
     // Simulate physical MikroTik activation and guarantee a six-digit PIN.
-    const {session,activation}=await activateMockRouter(purchasedSession)
+    const {session,activation}=await activateRouter(purchasedSession,hostId)
     res.status(201).json({
       session,
       voucher:session,
@@ -223,7 +262,7 @@ apiRouter.post('/vouchers/purchase', requireUser, async (req,res,next)=>{
   }catch(e){
     console.error('[voucher purchase]',{code:e.code,message:e.message,details:e.details,hint:e.hint})
     if(e.status)return res.status(e.status).json({message:e.message})
-    if(['42P01','42883'].includes(e.code))return res.status(503).json({message:'The Supabase voucher schema is incomplete. Apply the project migrations and try again.'})
+    if(['42P01','42883','PGRST205'].includes(e.code))return res.status(503).json({message:'The Supabase voucher or hardware schema is incomplete. Apply the project migrations and try again.'})
     if(e.code==='42501')return res.status(503).json({message:'The voucher service does not have the required Supabase permissions.'})
     if(e.code==='PGRST116')return res.status(404).json({message:'The selected hotspot or wallet profile was not found.'})
     next(e)

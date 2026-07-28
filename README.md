@@ -27,9 +27,9 @@ npm run dev
 
 Without Supabase keys, the original JSON demo remains available. With configured Supabase and Paystack credentials, secure production flows are enabled and phone authentication is required.
 
-## Setup guide
+## Setup guides
 
-Read **[PRODUCTION_SETUP.md](./PRODUCTION_SETUP.md)** before connecting live credentials or physical routers.
+Read **[PRODUCTION_SETUP.md](./PRODUCTION_SETUP.md)** before connecting live credentials. For real MikroTik/FreeRADIUS or controller provisioning, apply `supabase/migrations/004_hardware_integration.sql` and follow **[HARDWARE_SETUP.md](./HARDWARE_SETUP.md)**.
 
 Key files:
 
