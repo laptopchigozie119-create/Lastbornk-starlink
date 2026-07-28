@@ -54,8 +54,8 @@ export function MockConnection({ session, notify, reload }) {
       <div><b>{connected ? 'Connected' : 'Ready to connect'}</b><small>{connected ? 'Mock MikroTik session is live' : `PIN ${session.code || session.access_code}`}</small></div>
     </div>
     {connected && <div className="telemetry-strip">
-      <span><Gauge /><b>{Number(telemetry.mbps || 0).toFixed(1)}</b><small>Mbps</small></span>
-      <span><b>{Number(telemetry.dataUsedGb || 0).toFixed(4)}</b><small>GB used</small></span>
+      <span><Gauge /><b>{Number(telemetry.mbps || 0).toFixed(1)}</b><small>link Mbps</small></span>
+      <span><b>{Number(telemetry.dataUsedGb || 0).toFixed(4)}</b><small>GB used · {Number(telemetry.usageMbps || 0).toFixed(2)} avg Mbps</small></span>
       <span><b>{money(telemetry.usageValueNgn)}</b><small>@ ₦{telemetry.rateNgnPerGb || 100}/GB</small></span>
     </div>}
     <button className={connected ? 'disconnect-btn' : 'connect-btn'} disabled={busy} onClick={connected ? disconnect : connect}>

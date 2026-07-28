@@ -209,6 +209,25 @@ apiRouter.post('/vouchers/purchase', requireUser, async (req,res,next)=>{
   }
 })
 const MOCK_DATA_RATE_NGN_PER_GB = 100
+// Link speed is not the same as sustained transfer. Model average traffic at
+// 5% utilization so a displayed 24 Mbps link does not bill as 24 Mbps nonstop.
+const MOCK_LINK_UTILIZATION = 0.05
+
+function usageSnapshot(metadata, now = Date.now()) {
+  const linkMbps = Math.max(0, Number(metadata.mock_mbps || 24))
+  const usageMbps = Math.max(0, Number(metadata.usage_mbps ?? linkMbps * MOCK_LINK_UTILIZATION))
+  const baseGb = Math.max(0, Number(metadata.base_gb ?? metadata.data_used_gb ?? 0))
+  const connectedAt = metadata.connected_at ? new Date(metadata.connected_at).getTime() : now
+  const elapsedSeconds = metadata.connected && Number.isFinite(connectedAt) ? Math.max(0, (now - connectedAt) / 1000) : 0
+  // Mbps × seconds gives megabits; divide by 8,000 for decimal gigabytes.
+  const dataUsedGb = baseGb + (usageMbps * elapsedSeconds) / 8000
+  return {
+    linkMbps,
+    usageMbps,
+    dataUsedGb,
+    usageValueNgn: dataUsedGb * MOCK_DATA_RATE_NGN_PER_GB,
+  }
+}
 
 async function getSessionForCustomer(req, sessionId) {
   const { data, error } = await dbFor(req)
@@ -232,18 +251,14 @@ async function calculateAndPersistUsage(session) {
   if (error) throw error
 
   const metadata = earning.metadata || {}
-  const mbps = Number(metadata.mock_mbps || 24)
-  const baseGb = Number(metadata.base_gb || metadata.data_used_gb || 0)
-  const connectedAt = metadata.connected_at ? new Date(metadata.connected_at).getTime() : Date.now()
-  const elapsedSeconds = metadata.connected ? Math.max(0, (Date.now() - connectedAt) / 1000) : 0
-  // Mbps × seconds gives megabits; divide by 8,000 for decimal gigabytes.
-  const dataUsedGb = baseGb + (mbps * elapsedSeconds) / 8000
-  const usageValueNgn = dataUsedGb * MOCK_DATA_RATE_NGN_PER_GB
+  const snapshot = usageSnapshot(metadata)
   const nextMetadata = {
     ...metadata,
-    data_used_gb: Number(dataUsedGb.toFixed(6)),
-    usage_value_ngn: Number(usageValueNgn.toFixed(2)),
-    mock_mbps: mbps,
+    data_used_gb: Number(snapshot.dataUsedGb.toFixed(6)),
+    usage_value_ngn: Number(snapshot.usageValueNgn.toFixed(2)),
+    mock_mbps: snapshot.linkMbps,
+    usage_mbps: snapshot.usageMbps,
+    link_utilization: MOCK_LINK_UTILIZATION,
     data_rate_ngn_per_gb: MOCK_DATA_RATE_NGN_PER_GB,
   }
 
@@ -264,15 +279,16 @@ apiRouter.post('/vouchers/:id/connect',requireUser,async(req,res,next)=>{
     if(!session.hosts?.is_online)return res.status(409).json({message:'This hotspot is currently offline.'})
     const current=await calculateAndPersistUsage(session)
     const now=new Date().toISOString()
-    const metadata={...current,connected:true,connected_at:now,base_gb:Number(current.data_used_gb||0),mock_mbps:Number(current.mock_mbps||crypto.randomInt(18,46))}
+    const linkMbps=Number(current.mock_mbps||crypto.randomInt(18,46))
+    const metadata={...current,connected:true,connected_at:now,base_gb:Number(current.data_used_gb||0),mock_mbps:linkMbps,usage_mbps:Number((linkMbps*MOCK_LINK_UTILIZATION).toFixed(3))}
     const{error:txError}=await supabaseAdmin.from('transactions').update({metadata}).eq('session_id',session.id).eq('type','host_earning');if(txError)throw txError
     const{data:connected,error}=await supabaseAdmin.from('vouchers_sessions').update({status:'used'}).eq('id',session.id).select('*, hosts(business_name,user_id,address)').single();if(error)throw error
-    res.json({session:connected,connection:{connected:true,simulated:true,mbps:metadata.mock_mbps,dataUsedGb:metadata.data_used_gb,usageValueNgn:metadata.usage_value_ngn,rateNgnPerGb:MOCK_DATA_RATE_NGN_PER_GB}})
+    res.json({session:connected,connection:{connected:true,simulated:true,mbps:metadata.mock_mbps,usageMbps:metadata.usage_mbps,dataUsedGb:metadata.data_used_gb,usageValueNgn:metadata.usage_value_ngn,rateNgnPerGb:MOCK_DATA_RATE_NGN_PER_GB}})
   }catch(e){next(e)}
 })
 
 apiRouter.get('/vouchers/:id/telemetry',requireUser,async(req,res,next)=>{
-  try{ensure();const session=await getSessionForCustomer(req,req.params.id);const usage=await calculateAndPersistUsage(session);res.json({connected:session.status==='used'&&Boolean(usage.connected),simulated:true,mbps:Number(usage.mock_mbps||0),dataUsedGb:Number(usage.data_used_gb||0),usageValueNgn:Number(usage.usage_value_ngn||0),rateNgnPerGb:MOCK_DATA_RATE_NGN_PER_GB})}catch(e){next(e)}
+  try{ensure();const session=await getSessionForCustomer(req,req.params.id);const usage=await calculateAndPersistUsage(session);res.json({connected:session.status==='used'&&Boolean(usage.connected),simulated:true,mbps:Number(usage.mock_mbps||0),usageMbps:Number(usage.usage_mbps||0),dataUsedGb:Number(usage.data_used_gb||0),usageValueNgn:Number(usage.usage_value_ngn||0),rateNgnPerGb:MOCK_DATA_RATE_NGN_PER_GB})}catch(e){next(e)}
 })
 
 apiRouter.post('/vouchers/:id/disconnect',requireUser,async(req,res,next)=>{
@@ -286,11 +302,8 @@ apiRouter.get('/hosts/analytics',requireUser,async(req,res,next)=>{
     const{data:earnings,error}=await supabaseAdmin.from('transactions').select('amount,metadata,session_id').eq('host_id',host.id).eq('type','host_earning');if(error)throw error
     const rows=(earnings||[]).map(row=>{
       const metadata=row.metadata||{}
-      const mbps=Number(metadata.mock_mbps||0)
-      const baseGb=Number(metadata.base_gb||metadata.data_used_gb||0)
-      const elapsed=metadata.connected&&metadata.connected_at?Math.max(0,(Date.now()-new Date(metadata.connected_at).getTime())/1000):0
-      const dynamicGb=baseGb+(mbps*elapsed)/8000
-      return{...row,dynamicGb,usageValue:dynamicGb*MOCK_DATA_RATE_NGN_PER_GB}
+      const snapshot=usageSnapshot(metadata)
+      return{...row,dynamicGb:snapshot.dataUsedGb,usageValue:snapshot.usageValueNgn}
     })
     const totalDataGb=rows.reduce((sum,row)=>sum+row.dynamicGb,0)
     const pendingUsageValue=rows.reduce((sum,row)=>sum+row.usageValue,0)

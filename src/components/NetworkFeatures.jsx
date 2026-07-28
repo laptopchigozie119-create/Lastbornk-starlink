@@ -32,11 +32,13 @@ function ChatComposer({ hostId, sessionId, receiverId, authorRole, onSent }) {
 }
 
 function isSentByViewer(message, currentUserId, viewerRole) {
-  // Real customer/host accounts are identified by sender_id. In mock mode the
-  // same Supabase identity can act as both parties, so author_role disambiguates
-  // which interface actually sent the message.
-  if (message.sender_id !== message.receiver_id) return message.sender_id === currentUserId
-  return message.author_role === viewerRole
+  // author_role records the interface that actually created the message and is
+  // authoritative in both normal and same-account mock conversations. Older
+  // rows without that field fall back to the authenticated sender UUID.
+  if (message.author_role === 'customer' || message.author_role === 'host') {
+    return message.author_role === viewerRole
+  }
+  return message.sender_id === currentUserId
 }
 
 function Bubble({ message, currentUserId, viewerRole }) {
